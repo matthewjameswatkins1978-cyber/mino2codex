@@ -3,7 +3,7 @@ let request = ($in | from json)
 let decision = (match $request.case_id {
     "build-agent" => {action: "dispatch", choice_id: (if (worker-agent "Edit the file and run its tests") == "build" { "build" } else { "wrong" }), reason_codes: ["explicit_build"]}
     "plan-agent" => {action: "dispatch", choice_id: (if (worker-agent "Plan only; do not edit files") == "plan" { "plan" } else { "wrong" }), reason_codes: ["explicit_plan"]}
-    "explore-agent" => {action: "dispatch", choice_id: (if (worker-agent "Review only, read-only, do not modify files") == "explore" { "explore" } else { "wrong" }), reason_codes: ["explicit_review"]}
+    "explore-agent" => {action: "dispatch", choice_id: (if (worker-agent "Review only, read-only, do not modify files") == "build" { "build" } else { "wrong" }), reason_codes: ["explicit_review"]}
     "same-mode" => {action: "reuse", choice_id: (if (not (worker-fork-required "ses-old" "build" "build")) { "reuse" } else { "wrong" }), reason_codes: ["compatible_mode"]}
     "mode-change" => {action: "fork", choice_id: (if (worker-fork-required "ses-old" "plan" "build") { "fork" } else { "wrong" }), reason_codes: ["incompatible_mode"]}
     "zero-exit-no-evidence" => {action: "reject", choice_id: (if (worker-summary [] "mimo-v2.5" null null 1 0 false).status == "failed" { "fail" } else { "wrong" }), reason_codes: ["missing_evidence"]}

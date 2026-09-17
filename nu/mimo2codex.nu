@@ -161,8 +161,8 @@ def opencode-version [] {
 def worker-provider-id [] { "m2c-mimo" }
 def worker-model [model: string] { $"(worker-provider-id)/($model)" }
 def worker-agent [task: string] {
-    let text = ($task | str lowercase)
-    if (($text | str contains "plan only") or ($text | str contains "planning only")) { "plan" } else if (($text | str contains "review only") or ($text | str contains "read only") or ($text | str contains "read-only") or ($text | str contains "without modifying") or ($text | str contains "do not modify") or ($text | str contains "don't modify")) { "explore" } else { "build" }
+    let text = ($task | str lowercase | str trim)
+    if ($text | str starts-with "plan only") or ($text | str starts-with "planning only") { "plan" } else { "build" }
 }
 def worker-fork-required [session_id: any previous_agent: any agent: string] {
     ($session_id != null) and ($previous_agent != $agent)
