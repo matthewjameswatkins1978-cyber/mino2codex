@@ -1004,8 +1004,12 @@ def watch-parse-model [value: string] {
     if $trimmed in ["standard", "pro"] { $trimmed } else { null }
 }
 
+def watch-issue-repo [issue: record] {
+    $issue.repository.nameWithOwner? | default $issue.repository.name
+}
+
 def watch-admit-job [issue: record login: string] {
-    let repo_full = ($issue.repository.nameWithOwner? | default $issue.repository.name)
+    let repo_full = (watch-issue-repo $issue)
     let body_result = (do { run-external "gh" "issue" "view" ($issue.number | into string) "--repo" $repo_full "--json" "body,author" } | complete)
     if $body_result.exit_code != 0 { {ok: false, reason: "failed to fetch issue body"} } else {
         let detail = (try { $body_result.stdout | from json } catch { null })
@@ -1135,7 +1139,7 @@ def watch-command [args: list<string>] {
                 let admission = (watch-admit-job $job $login)
                 if $admission.ok {
                     print $"Claiming job: ($job.title)"
-                    if (watch-claim-job $job.repo $job.number) {
+                    if (watch-claim-job $admission.repo $admission.number) {
                         $running = true
                         let job_id = (worker-job-id)
                         let job_dir = (job-root | path join $"watch-($job_id)")
@@ -1157,9 +1161,9 @@ def watch-command [args: list<string>] {
                         let can_be_done = ($run_result.summary.status == "completed") and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match
                         let final_status = (if $can_be_done { "DONE" } else { "FAILED" })
                         let final_title = $"[M2C ($final_status)]"
-                        watch-update-title $job.repo $job.number $final_title
+                        watch-update-title $admission.repo $admission.number $final_title
                         let comment = (watch-build-result-comment $run_result.summary $delivery $admission.model $final_status)
-                        watch-add-comment $job.repo $job.number $comment
+                        watch-add-comment $admission.repo $admission.number $comment
                         print $"Job ($final_status). Title: ($final_title)"
                         $running = false
                     } else {
@@ -1168,8 +1172,9 @@ def watch-command [args: list<string>] {
                     }
                 } else {
                     print $"Job rejected: ($admission.reason)"
-                    watch-update-title $job.repo $job.number "[M2C BLOCKED]"
-                    watch-add-comment $job.repo $job.number $"Rejection reason: ($admission.reason)"
+                    let blocked_repo = (watch-issue-repo $job)
+                    watch-update-title $blocked_repo $job.number "[M2C BLOCKED]"
+                    watch-add-comment $blocked_repo $job.number $"Rejection reason: ($admission.reason)"
                 }
             }
         }
