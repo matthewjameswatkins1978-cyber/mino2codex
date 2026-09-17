@@ -102,6 +102,27 @@ let results = [
         assert (not (worker-fork-required "ses-old" "build" "build")) "same agent continues"
         assert (not (worker-fork-required null null "build")) "new session does not fork"
     })
+    (test "result envelope reports selected execution agent" {
+        let cases = [
+            {task: "Edit the file and run its tests", expected: "build"}
+            {task: "Plan only; do not edit files", expected: "plan"}
+            {task: "Review only, read-only, do not modify files", expected: "explore"}
+        ]
+        for case in $cases {
+            let envelope = (result-envelope (worker-summary [] "mimo-v2.5" null null 0 0 false) (worker-agent $case.task))
+            assert-equal $envelope.agent $case.expected $"agent truth for ($case.expected)"
+        }
+    })
+    (test "packet files use metadata then filename inference" {
+        let inferred = (packet-filename-inference "tethers-l2-L2A.md")
+        assert-equal $inferred.workstream "tethers-l2" "workstream inference"
+        assert-equal $inferred.packet "L2A" "packet inference"
+        let underscored = (packet-filename-inference "tethers_l2_L2A.md")
+        assert-equal $underscored.workstream "tethers-l2" "underscore inference"
+        let metadata = (packet-front-matter "---\nworkstream: explicit-stream\npacket: P9\n---\nDo the work.")
+        assert-equal $metadata.workstream "explicit-stream" "front matter workstream"
+        assert-equal $metadata.packet "P9" "front matter packet"
+    })
     (test "OpenCode JSON event parsing and summary" {
         let raw = '{"type":"text","sessionID":"ses-test","part":{"text":"done"}}
 {"type":"tool_use","sessionID":"ses-test","part":{"tool":"edit","state":{"status":"completed","input":{"filePath":"src/a.nu"}}}}
@@ -115,6 +136,22 @@ let results = [
         assert-equal $summary.final_text "done" "final text"
         let failed = (worker-summary [] "mimo-v2.5" null null 1 1 false)
         assert-equal $failed.status "failed" "empty worker output fails closed"
+    })
+    (test "telemetry derives timing and tool aggregates without content" {
+        let started = ((date now) - 5sec)
+        let start_ms = ((($started | into int) / 1000000) | math round | into int)
+        let events = [
+            {type: "step_start", timestamp: ($start_ms + 1000), sessionID: "ses-test"}
+            {type: "tool_use", timestamp: ($start_ms + 2000), part: {tool: "read", state: {status: "completed", input: {filePath: "secret.txt"}}}}
+            {type: "tool_use", timestamp: ($start_ms + 3000), part: {tool: "bash", state: {status: "completed", input: {command: "cargo test"}}}}
+        ]
+        let telemetry = (telemetry-derived $events $started (date now))
+        assert-equal $telemetry.tool_calls_by_type.read 1 "read count"
+        assert-equal $telemetry.tool_calls_by_type.bash 1 "verification tool count"
+        assert-equal $telemetry.files_read_count 1 "read aggregate"
+        assert-equal $telemetry.verification_commands_count 1 "verification aggregate"
+        assert (($telemetry.time_to_first_tool_seconds | into float) >= 1.0) "first tool timing"
+        assert (not (($telemetry.records | to json) | str contains "secret.txt")) "telemetry has no file content"
     })
     (test "context threshold policy" {
         assert-equal (checkpoint-state {context_percent: 29.9}) "normal" "normal"
@@ -205,6 +242,12 @@ let results = [
         let frame = (console-frame $state 50)
         assert (($frame | length) >= 5) "narrow frame"
         assert (($frame | str join "\n") | str contains "STARTING") "narrow state"
+    })
+    (test "console refresh events are narrow and meaningful" {
+        assert (console-meaningful-event {type: "step_start"}) "starting refresh"
+        assert (console-meaningful-event {type: "tool_use", part: {tool: "edit", state: {status: "completed", input: {filePath: "a"}}}}) "file change refresh"
+        assert (console-meaningful-event {type: "tool_use", part: {tool: "bash", state: {status: "completed", input: {command: "cargo test"}}}}) "verification refresh"
+        assert (not (console-meaningful-event {type: "text", part: {text: "working"}})) "ordinary text waits for cadence"
     })
 ]
 

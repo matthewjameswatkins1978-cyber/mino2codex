@@ -119,6 +119,19 @@ def model-records [] {
 
 def version-value [] { open (source-root | path join "VERSION") | str trim }
 def nu-version [] { run-external $nu.current-exe "--version" | str trim }
+def version-at [root: path] { try { open ($root | path join "VERSION") | str trim } catch { "unknown" } }
+def file-hash-at [root: path] { try { open --raw ($root | path join "mimo2codex.nu") | hash sha256 } catch { "unknown" } }
+def install-version-info [] {
+    let installed = (version-at (state-root))
+    let source = (version-at (source-root))
+    let installed_hash = (file-hash-at (state-root))
+    let source_hash = (file-hash-at (source-root))
+    let dev_source = (($env.MIMO2CODEX_SOURCE_ROOT? | default "") | path expand)
+    let installed_root = (state-root | path expand)
+    let source_root = (source-root | path expand)
+    let stale = (($dev_source | is-not-empty) and ($source_root != $installed_root) and (($installed != $source) or ($installed_hash != $source_hash)))
+    {installed: $installed, source: $source, source_root: $source_root, state_root: $installed_root, stale: $stale}
+}
 
 def opencode-path [] {
     let found = (which opencode | get path? | first | default "")
@@ -259,6 +272,75 @@ def parse-worker-events [raw: string] {
     $raw | lines | each {|line| try { $line | from json } catch { null }} | where {|item| $item != null }
 }
 
+def telemetry-tool [event: any] {
+    ($event.part?.tool? | default "unknown" | str lowercase)
+}
+
+def telemetry-input [event: any] {
+    $event.part?.state?.input? | default {}
+}
+
+def telemetry-command [event: any] {
+    let input = (telemetry-input $event)
+    [$input.command? $input.cmd? $input.script?] | where {|value| $value != null} | first | default "" | into string
+}
+
+def telemetry-event-seconds [event: any started_ms: int] {
+    let timestamp = ($event.timestamp? | default null)
+    if ($timestamp == null) { null } else { ((($timestamp | into int) - $started_ms) / 1000.0) }
+}
+
+def telemetry-tool-events [events: list<any>] {
+    $events | where type in ["tool_use", "tool_call"]
+}
+
+def telemetry-counts [values: list<string>] {
+    $values | reduce -f {} {|value, acc| $acc | upsert $value (($acc | get -o $value | default 0) + 1) }
+}
+
+def telemetry-verification-command [event: any] {
+    let command = (telemetry-command $event | str lowercase)
+    ($command | str contains "test") or ($command | str contains "verify") or ($command | str contains "check") or ($command | str contains "pytest") or ($command | str contains "cargo") or ($command | str contains "dune") or ($command | str contains "grep -f")
+}
+
+def telemetry-derived [events: list<any> started: any ended: any] {
+    let started_ms = (((($started | into int) / 1000000) | math round) | into int)
+    let duration = (((($ended - $started) | into int) / 1000000000) | math round)
+    let tool_events = (telemetry-tool-events $events)
+    let timestamps = ($events | each {|event| $event.timestamp? | default null} | where {|value| $value != null} | each {|value| $value | into int} | sort)
+    let provider_event = ($events | where {|event| ($event.timestamp? | default null) != null} | first)
+    let first_tool = ($tool_events | first)
+    let first_successful_tool = ($tool_events | where {|event| let status = ($event.part.state.status? | default ""); $status in ["completed", "success", "succeeded"]} | first)
+    let first_file_read = ($tool_events | where {|event| (telemetry-tool $event) in ["read", "cat", "open"]} | first)
+    let first_file_change = ($tool_events | where {|event| (telemetry-tool $event) in ["edit", "write", "patch"]} | first)
+    let first_verification = ($tool_events | where {|event| telemetry-verification-command $event} | first)
+    let failures = ($tool_events | where {|event| ($event.part.state.status? | default "") in ["error", "failed"]})
+    let verification_count = ($tool_events | where {|event| telemetry-verification-command $event} | length)
+    let tool_times = ($tool_events | each {|event|
+        let time = ($event.part.state.time? | default {})
+        if (($time.start? | default null) != null) and (($time.end? | default null) != null) { (($time.end - $time.start) / 1000.0) } else { null }
+    } | where {|value| $value != null})
+    let silence = ($timestamps | window 2 | each {|pair| (($pair.1 - $pair.0) / 1000.0)} | default [] | sort | last | default null)
+    let records = (mut rec = [{t: 0.0, event: "worker_start"}]; if ($provider_event != null) { $rec = ($rec | append {t: (telemetry-event-seconds $provider_event $started_ms), event: "provider_first_event"}) }; for event in $tool_events { let tool = (telemetry-tool $event); let ok = (($event.part.state.status? | default "") not-in ["error", "failed"]); $rec = ($rec | append {t: (telemetry-event-seconds $event $started_ms), event: "tool_end", tool: $tool, ok: $ok}) }; if ($first_file_change != null) { $rec = ($rec | append {t: (telemetry-event-seconds $first_file_change $started_ms), event: "first_file_change"}) }; if ($first_verification != null) { $rec = ($rec | append {t: (telemetry-event-seconds $first_verification $started_ms), event: "first_verification"}) }; $rec | append {t: $duration, event: "worker_complete"})
+    {
+        records: $records
+        time_to_first_provider_event_seconds: (if ($provider_event == null) { null } else { telemetry-event-seconds $provider_event $started_ms })
+        time_to_first_tool_seconds: (if ($first_tool == null) { null } else { telemetry-event-seconds $first_tool $started_ms })
+        time_to_first_successful_tool_seconds: (if ($first_successful_tool == null) { null } else { telemetry-event-seconds $first_successful_tool $started_ms })
+        time_to_first_file_read_seconds: (if ($first_file_read == null) { null } else { telemetry-event-seconds $first_file_read $started_ms })
+        time_to_first_change_seconds: (if ($first_file_change == null) { null } else { telemetry-event-seconds $first_file_change $started_ms })
+        time_to_first_verification_seconds: (if ($first_verification == null) { null } else { telemetry-event-seconds $first_verification $started_ms })
+        provider_wait_seconds: (if ($provider_event == null) { null } else { telemetry-event-seconds $provider_event $started_ms })
+        tool_execution_seconds: (if ($tool_times | is-empty) { null } else { $tool_times | math sum })
+        longest_provider_silence_seconds: $silence
+        tool_calls_by_type: (telemetry-counts ($tool_events | each {|event| telemetry-tool $event}))
+        tool_failures_by_type: (telemetry-counts ($failures | each {|event| telemetry-tool $event}))
+        files_read_count: ($tool_events | where {|event| (telemetry-tool $event) in ["read", "cat", "open"]} | length)
+        files_changed_count: ($tool_events | where {|event| (telemetry-tool $event) in ["edit", "write", "patch"]} | length)
+        verification_commands_count: $verification_count
+    }
+}
+
 def activity-from-event [event: any] {
     let tool = ($event.part.tool? | default "" | str lowercase)
     let input = ($event.part.state?.input? | default {})
@@ -338,7 +420,13 @@ def finish-console [enabled: bool previous_lines: int] {
     if $enabled { let esc = (char --integer 27); print --stderr $"($esc)[?25h"; if $previous_lines > 0 { print --stderr "" } }
 }
 
-def worker-summary [events: list<any> model: string workstream: any packet: any duration: any exit_code: int timed_out: bool cancelled: bool = false] {
+def console-meaningful-event [event: any] {
+    let tool = (telemetry-tool $event)
+    let status = ($event.part?.state?.status? | default "")
+    ($event.type in ["tool_use", "tool_call"] and (($tool in ["edit", "write", "patch"]) or ($status in ["error", "failed"]) or (telemetry-verification-command $event))) or ($event.type == "step_start")
+}
+
+def worker-summary [events: list<any> model: string workstream: any packet: any duration: any exit_code: int timed_out: bool cancelled: bool = false telemetry: any = null] {
     let sessions = ($events | get sessionID? | default [] | where {|x| $x != null} | uniq)
     let finishes = ($events | where type == "step_finish")
     let last_finish = ($finishes | last)
@@ -354,7 +442,7 @@ def worker-summary [events: list<any> model: string workstream: any packet: any 
         let input = ($event.part.state.input? | default {})
         [$input.filePath? $input.path? $input.file?] | where {|path| $path != null}
     } | flatten | where {|path| $path != null} | uniq)
-    {
+    let base = {
         status: (if $cancelled { "cancelled" } else if $timed_out { "timed_out" } else if $exit_code == 0 { "completed" } else { "failed" })
         backend: "opencode"
         provider: (worker-provider-id)
@@ -373,6 +461,7 @@ def worker-summary [events: list<any> model: string workstream: any packet: any 
         exit_code: $exit_code
         final_text: $text
     }
+    if ($telemetry == null) { $base } else { $base | merge $telemetry }
 }
 
 def worker-job-id [] { random uuid | str replace --all "-" "" }
@@ -381,6 +470,10 @@ def worker-command [model: string prompt: string session_id: any cwd: path agent
     let base = ["run" "--pure" "--model" (worker-model $model) "--agent" $agent "--format" "json" "--dir" ($cwd | path expand)]
     let continued = (if ($session_id == null) { $base } else if $fork { $base | append ["--session" $session_id "--fork"] } else { $base | append ["--session" $session_id] })
     $continued | append $prompt
+}
+
+def result-envelope [summary: record agent: string] {
+    $summary | insert agent $agent
 }
 
 def worker-run [model: string prompt: string workstream: any packet: any session_id: any quiet: bool = false agent: string = "build" fork: bool = false] {
@@ -412,17 +505,25 @@ def worker-run [model: string prompt: string workstream: any packet: any session
     mut last_size = -1
     mut finished: any = null
     mut done = false
+    mut last_render_at = $started
+    mut rendered_event_count = 0
     while not $done {
         let raw = (if ($raw_path | path exists) { open --raw $raw_path } else { "" })
         let size = ($raw | str length)
         if $size != $last_size { $last_event_at = (date now); $last_size = $size }
         let events = (parse-worker-events $raw)
         let state = (worker-console-state $events $model $started 1200 $last_event_at true)
-        if $console_on {
+        let new_events = ($events | skip $rendered_event_count)
+        let elapsed_since_render = (((((date now) - $last_render_at) | into int) / 1000000000) | math round)
+        let meaningful_event = ($new_events | any {|event| console-meaningful-event $event})
+        let refresh = ($previous_lines == 0) or $meaningful_event or ($elapsed_since_render >= 10)
+        if $console_on and $refresh {
             let frame = (console-frame $state (try { (term size).columns } catch { 80 }))
             let esc = (char --integer 27)
             if $previous_lines == 0 { print --stderr $"($esc)[?25l" }
             $previous_lines = (render-console $frame $previous_lines)
+            $last_render_at = (date now)
+            $rendered_event_count = ($events | length)
         }
         let message = (try { job recv --timeout 0sec } catch { null })
         if $message != null {
@@ -447,6 +548,12 @@ def worker-run [model: string prompt: string workstream: any packet: any session
     let duration = (((($ended - $started) | into int) / 1000000000) | math round)
     let raw = (if ($raw_path | path exists) { open --raw $raw_path } else { "" })
     let events = (parse-worker-events $raw)
+    let telemetry = (telemetry-derived $events $started $ended)
+    let telemetry_dir = (state-path "runs" | path join $job_id)
+    let telemetry_path = ($telemetry_dir | path join "events.jsonl")
+    mkdir $telemetry_dir
+    ($telemetry.records | each {|record| $record | to json -r} | str join "\n" | save --force $telemetry_path)
+    let telemetry_summary = ($telemetry | reject records | insert telemetry_path $telemetry_path)
     let final_status = (if ($finished.cancelled? | default false) { "cancelled" } else if $finished.timed_out { "timed_out" } else if $finished.exit_code == 0 { "complete" } else { "failed" })
     if $console_on {
         let final_state = (worker-console-state $events $model $started 1200 $last_event_at false $final_status)
@@ -454,7 +561,7 @@ def worker-run [model: string prompt: string workstream: any packet: any session
         $previous_lines = (render-console $frame $previous_lines)
         finish-console true $previous_lines
     }
-    let result = ((worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out ($finished.cancelled? | default false)) | insert agent $agent)
+    let result = (result-envelope (worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out ($finished.cancelled? | default false) $telemetry_summary) $agent)
     {summary: $result, raw_path: $raw_path, stderr_path: $stderr_path}
 }
 
@@ -494,6 +601,51 @@ def parse-run-args [args: list<string>] {
     if ($task | is-empty) { error make {msg: "m2c run requires a bounded task"} }
     if ($packet != null) and ($workstream == null) { error make {msg: "--packet requires --workstream"} }
     {json: $machine_json, quiet: $quiet, workstream: $workstream, packet: $packet, task: ($task | str join " ")}
+}
+
+def packet-front-matter [content: string] {
+    let lines = ($content | lines)
+    if (($lines | first | default "") != "---") { {} } else {
+        let closing = ($lines | enumerate | where item == "---" | skip 1 | first)
+        if ($closing == null) { {} } else {
+            $lines | first $closing.index | skip 1 | parse --regex '^(?<key>workstream|packet|directory)\s*:\s*(?<value>.+)$' | reduce -f {} {|row, acc|
+                $acc | upsert $row.key ($row.value | str trim | str trim --char '"')
+            }
+        }
+    }
+}
+
+def packet-filename-inference [file: path] {
+    let stem = ($file | path parse | get stem | str replace --all "_" "-")
+    let parts = ($stem | split row "-" | where {|part| ($part | is-not-empty)})
+    if (($parts | length) < 2) { {} } else {
+        let candidate = ($parts | last)
+        let valid_packet = (($candidate | str replace -r '^[A-Za-z0-9]+$' "") | is-empty) and (($candidate | str replace -r '.*[0-9].*' "yes") == "yes") and (($candidate | str replace -r '.*[A-Za-z].*' "yes") == "yes")
+        if (not $valid_packet) { {} } else { {workstream: ($parts | drop 1 | str join "-"), packet: $candidate} }
+    }
+}
+
+def packet-file-details [file: path] {
+    let expanded = ($file | path expand)
+    if not ($expanded | path exists) { error make {msg: $"Packet file does not exist: ($expanded)"} }
+    let content = (open --raw $expanded)
+    {file: $expanded, content: $content, metadata: (packet-front-matter $content), inferred: (packet-filename-inference $expanded)}
+}
+
+def packet-command [model: string args: list<string>] {
+    if (($args | length) < 1) { error make {msg: "packet requires a local packet file"} }
+    let details = (packet-file-details ($args | first))
+    let rest = ($args | skip 1)
+    let parsed = (parse-run-args ($rest | append $details.content))
+    let workstream = (if ($parsed.workstream != null) { $parsed.workstream } else if (($details.metadata.workstream? | default null) != null) { $details.metadata.workstream } else { $details.inferred.workstream? | default null })
+    let packet = (if ($parsed.packet != null) { $parsed.packet } else if (($details.metadata.packet? | default null) != null) { $details.metadata.packet } else { $details.inferred.packet? | default null })
+    mut forwarded = $rest
+    if ($parsed.workstream == null) and ($workstream != null) { $forwarded = ($forwarded | append ["--workstream" $workstream] | flatten) }
+    if ($parsed.packet == null) and ($packet != null) { $forwarded = ($forwarded | append ["--packet" $packet] | flatten) }
+    $forwarded = ($forwarded | append $details.content)
+    let agent = (worker-agent $details.content)
+    print --stderr $"Packet       ($details.file | path basename)\nWorkstream   (if ($workstream == null) { "(none inferred)" } else { $workstream })\nPacket ID    (if ($packet == null) { "(none inferred)" } else { $packet })\nModel        (if $model == "mimo-v2.5" { "standard" } else { "pro" })\nAgent        ($agent)\nDirectory    (pwd | path expand)"
+    run-worker-command $model $forwarded
 }
 
 def run-worker-command [model: string args: list<string>] {
@@ -585,6 +737,9 @@ def print-help [] {
     print "  m2c run --json \"task\"  emit the stable JSON result envelope"
     print "  m2c run --quiet --json \"task\"  suppress the live console"
     print "  m2c run --workstream NAME --packet ID \"task\"  continue bounded work"
+    print "  m2c packet FILE  run a Standard packet file"
+    print "  m2c standard packet FILE  run a Standard packet file"
+    print "  m2c pro packet FILE  run a Pro packet file"
     print "  m2c models          list supported models"
     print "  m2c setup           install/repair isolated MiMo configuration"
     print "  m2c doctor [--live] diagnose configuration; --live checks the worker"
@@ -600,7 +755,10 @@ def print-help [] {
 
 def read-codex-version [] {
     let found = (which codex | get path? | first | default "")
-    if ($found | is-empty) { "missing" } else { try { run-external "codex" "--version" | str trim } catch { "unavailable" } }
+    if ($found | is-empty) { "missing" } else {
+        let result = (do { run-external "codex" "--version" } | complete)
+        if $result.exit_code == 0 { $result.stdout | str trim } else { "unavailable" }
+    }
 }
 
 def check-row [label: string status: string detail: string] { {check: $label, status: $status, detail: $detail} }
@@ -625,7 +783,9 @@ def doctor [args: list<string> = []] {
     let catalog_ok = (try { check-catalogue } catch { false })
     let credential = (credential-info)
     let codex_path = (which codex | get path? | first | default "")
-    let codex_ok = ($codex_path | is-not-empty)
+    let codex_version = (read-codex-version)
+    let codex_ok = (($codex_path | is-not-empty) and ($codex_version not-in ["missing", "unavailable"]))
+    let install_info = (install-version-info)
     let config = (state-root | path join "codex-home" | path join "config.toml")
     let catalogue_path = (catalogue-path)
     let opencode = (opencode-version)
@@ -637,7 +797,9 @@ def doctor [args: list<string> = []] {
     let rows = [
         (check-row "Platform" (if (["windows", "unix"] | any {|x| $x == $nu.os-info.family}) { "PASS" } else { "FAIL" }) $nu.os-info.name)
         (check-row "Nushell" "PASS" (nu-version))
-        (check-row "Codex" (if $codex_ok { "PASS" } else { "FAIL" }) (if $codex_ok { (read-codex-version) } else { "not found" }))
+        (check-row "Codex" (if $codex_ok { "PASS" } else if ($codex_path | is-not-empty) { "SKIP" } else { "FAIL" }) (if ($codex_path | is-empty) { "not found" } else if $codex_version == "unavailable" { "direct route unavailable" } else { $codex_version }))
+        (check-row "Installed m2c" (if $install_info.installed == "unknown" { "FAIL" } else if $install_info.stale { "STALE" } else { "PASS" }) $install_info.installed)
+        (check-row "m2c source" "PASS" $install_info.source)
         (check-row "OpenCode" (if ($opencode == "missing") { "FAIL" } else if $opencode_platform.status == "invalid" { "FAIL" } else { "PASS" }) (if $opencode_platform.status == "invalid" { $opencode_platform.detail } else { $opencode }))
         (check-row "MiMo config directory" (if (state-root | path exists) { "PASS" } else { "FAIL" }) (state-root))
         (check-row "Isolated CODEX_HOME" (if (state-root | path join "codex-home" | path exists) { "PASS" } else { "FAIL" }) (state-root | path join "codex-home"))
@@ -774,9 +936,9 @@ export def invoke [...args: string] {
         let rest = ($args | skip 1)
         let selected = ($rest | first | default "pro")
         if $selected == "standard" { launch-codex (provider-data).models.standard ($rest | skip 1) } else if $selected == "pro" { launch-codex (provider-data).models.pro ($rest | skip 1) } else { launch-codex (provider-data).models.pro $rest }
-    } else if $command == "run" { run-worker-command (provider-data).models.pro ($args | skip 1) } else if $command == "pro" {
-        if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.pro ($args | skip 2) } else { launch-worker-interactive (provider-data).models.pro }
+    } else if $command == "run" { run-worker-command (provider-data).models.pro ($args | skip 1) } else if $command == "packet" { packet-command (provider-data).models.standard ($args | skip 1) } else if $command == "pro" {
+        if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.pro ($args | skip 2) } else if (($args | length) > 1) and (($args | get 1) == "packet") { packet-command (provider-data).models.pro ($args | skip 2) } else { launch-worker-interactive (provider-data).models.pro }
     } else if $command == "standard" {
-        if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.standard ($args | skip 2) } else { launch-worker-interactive (provider-data).models.standard }
+        if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.standard ($args | skip 2) } else if (($args | length) > 1) and (($args | get 1) == "packet") { packet-command (provider-data).models.standard ($args | skip 2) } else { launch-worker-interactive (provider-data).models.standard }
     } else { launch-worker-interactive (provider-data).models.pro }
 }

@@ -49,6 +49,8 @@ Interactive machine runs also show a small live worker console on stderr. It ref
 
 Machine workers explicitly select OpenCode's `build` agent, so ordinary `run` packets are execution-capable and do not inherit the user's interactive plan mode. Packets that explicitly say plan-only use `plan`; explicit review/read-only packets use `explore`. If a workstream changes agent mode, m2c forks the prior session before continuing so useful context is retained without carrying an accidental mode across packets.
 
+Packet files are supported with `m2c packet FILE`, `m2c standard packet FILE`, or `m2c pro packet FILE`. Front matter can provide `workstream`, `packet`, and `directory`; explicit flags win, then front matter, then filename inference. Run telemetry is privacy-safe and documented in [`docs/TELEMETRY.md`](docs/TELEMETRY.md).
+
 ## Workstreams and context
 
 Use a workstream for related bounded packets. State is kept outside the repository and records only orchestration metadata: cwd, model, OpenCode session ID, packet, timestamps, context estimate, and checkpoint generation. A cwd or model mismatch fails; m2c never silently switches models or reuses a missing session.
