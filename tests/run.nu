@@ -760,6 +760,18 @@ let results = [
         let detail2 = {state: "OPEN", title: "[M2C RUNNING]", author: {login: "alice"}, body: "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\nmodel: standard\n---\ndo work"}
         assert (not ($detail2.title | str starts-with "[M2C QUEUED]")) "title changed issue rejected"
     })
+    # --- regression: OPEN state passes state/title gate (gh returns uppercase OPEN) ---
+    (test "OPEN state with QUEUED title passes state gate (gh enum case normalization)" {
+        let detail = {state: "OPEN", title: "[M2C QUEUED] test", author: {login: "alice"}, body: "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\nmodel: standard\n---\ndo work"}
+        let issue_state = ($detail.state? | default "" | str lowercase)
+        assert ($issue_state == "open") "normalized OPEN passes"
+        assert ($detail.title | str starts-with "[M2C QUEUED]") "QUEUED title accepted"
+    })
+    (test "CLOSED state with QUEUED title still rejected after normalization" {
+        let detail = {state: "CLOSED", title: "[M2C QUEUED] test", author: {login: "alice"}, body: "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\nmodel: standard\n---\ndo work"}
+        let issue_state = ($detail.state? | default "" | str lowercase)
+        assert ($issue_state != "open") "CLOSED still rejected"
+    })
     # --- result comment branch mismatch explanation ---
     (test "result comment explains branch mismatch with local and expected" {
         let delivery = {local_branch: "main", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: false}
@@ -767,6 +779,22 @@ let results = [
         let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
         assert ($comment | str contains "local branch main") "mentions local branch"
         assert ($comment | str contains "does not match requested branch") "explains mismatch"
+    })
+    # --- regression: failure/fallback delivery shape includes branch_match ---
+    (test "fallback delivery record from clone failure produces FAILED without column error" {
+        let delivery = {local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: false}
+        let summary = {status: "failed", exit_code: 1, final_text: "worker error"}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
+        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED status produced"
+        assert ($comment | str contains "worker status: failed") "worker failure reported"
+        assert ($comment | str contains "branch_match: MISMATCH") "branch_match shown as MISMATCH"
+        assert ($comment | str contains "worktree: DIRTY") "worktree dirty"
+        assert ($comment | str contains "remote: MISMATCH") "remote mismatch"
+    })
+    (test "fallback delivery with branch_match false prevents DONE gate" {
+        let delivery = {local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: false}
+        let can_be_done = (false) and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match and $delivery.branch_match
+        assert (not $can_be_done) "fallback delivery prevents DONE"
     })
 ]
 

@@ -1023,7 +1023,7 @@ def watch-admit-job [issue: record login: string] {
     if $body_result.exit_code != 0 { {ok: false, reason: "failed to fetch issue body"} } else {
         let detail = (try { $body_result.stdout | from json } catch { null })
         if ($detail == null) { {ok: false, reason: "failed to parse issue data"} } else {
-            let issue_state = ($detail.state? | default "")
+            let issue_state = ($detail.state? | default "" | str lowercase)
             if $issue_state != "open" { {ok: false, reason: $"issue is not open (state: ($issue_state))"} } else {
                 let issue_title = ($detail.title? | default "")
                 if not ($issue_title | str starts-with "[M2C QUEUED]") { {ok: false, reason: $"issue title is no longer [M2C QUEUED] (title: ($issue_title))"} } else {
@@ -1178,7 +1178,7 @@ def watch-command [args: list<string>] {
                         let delivery = (if ($run_result.clone_dir != null) {
                             watch-verify-delivery $run_result.clone_dir $admission
                         } else {
-                            {local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false}
+                            {local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: false}
                         })
                         let can_be_done = ($run_result.summary.status == "completed") and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match and $delivery.branch_match
                         let final_status = (if $can_be_done { "DONE" } else { "FAILED" })
