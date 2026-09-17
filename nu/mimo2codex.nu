@@ -269,7 +269,10 @@ def checkpoint-state [state: record] {
 }
 
 def parse-worker-events [raw: string] {
-    $raw | lines | each {|line| try { $line | from json } catch { null }} | where {|item| $item != null }
+    $raw | lines | each {|line|
+        let parsed = (try { $line | from json } catch { null })
+        if (($parsed | describe | str starts-with "record<")) { $parsed } else { null }
+    } | where {|item| $item != null }
 }
 
 def telemetry-tool [event: any] {
@@ -437,13 +440,13 @@ def worker-summary [events: list<any> model: string workstream: any packet: any 
     let context_pct = (context-percent $context_tokens)
     let text = ($events | where type == "text" | get part.text? | default [] | str join "")
     let tool_calls = ($events | where type in ["tool_use", "tool_call"] | length)
-    let tool_failures = ($events | where type == "tool_use" | each {|event| $event.part.state.status? | default "" } | where {|status| $status in ["error", "failed"]} | length)
+    let tool_failures = ($events | where type in ["tool_use", "tool_call"] | each {|event| $event.part.state.status? | default "" } | where {|status| $status in ["error", "failed"]} | length)
     let changed_files = ($events | where type == "tool_use" | where {|event| let tool = ($event.part.tool? | default ""); $tool in ["edit", "write", "patch"]} | each {|event|
         let input = ($event.part.state.input? | default {})
         [$input.filePath? $input.path? $input.file?] | where {|path| $path != null}
     } | flatten | where {|path| $path != null} | uniq)
     let base = {
-        status: (if $cancelled { "cancelled" } else if $timed_out { "timed_out" } else if $exit_code == 0 { "completed" } else { "failed" })
+        status: (if $cancelled { "cancelled" } else if $timed_out { "timed_out" } else if ($exit_code == 0) and (($finishes | length) > 0) and ($tool_failures == 0) { "completed" } else { "failed" })
         backend: "opencode"
         provider: (worker-provider-id)
         model: $model

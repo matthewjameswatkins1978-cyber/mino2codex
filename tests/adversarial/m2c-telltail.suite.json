@@ -1,0 +1,13 @@
+{"schema":"telltail.suite.v1","id":"m2c-current-product-adversarial","description":"Telltail probes against current m2c decision helpers.","subject":{"id":"mimo2codex","version":"89c6e6a-result-repair"},"adapter":{"type":"command","command":"powershell","args":["-NoProfile","-File","tests/adversarial/m2c-telltail-adapter.ps1"],"timeout_ms":30000},"dimensions":["agent","result_truth","platform","context"],"cases":[
+{"id":"build-agent","probe_kind":"route","situation":{},"choices":[{"id":"build","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"build","action":"dispatch"}},
+{"id":"plan-agent","probe_kind":"route","situation":{},"choices":[{"id":"plan","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"plan","action":"dispatch"}},
+{"id":"explore-agent","probe_kind":"route","situation":{},"choices":[{"id":"explore","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"explore","action":"dispatch"}},
+{"id":"same-mode","probe_kind":"route","situation":{},"choices":[{"id":"reuse","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"reuse","action":"reuse"}},
+{"id":"mode-change","probe_kind":"route","situation":{},"choices":[{"id":"fork","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"fork","action":"fork"}},
+{"id":"zero-exit-no-evidence","probe_kind":"route","situation":{},"choices":[{"id":"fail","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"fail","action":"reject"}},
+{"id":"zero-exit-tool-failure","probe_kind":"route","situation":{},"choices":[{"id":"fail","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"fail","action":"reject"}},
+{"id":"malformed-scalar","probe_kind":"route","situation":{},"choices":[{"id":"discard","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"discard","action":"discard"}},
+{"id":"linux-windows-exe","probe_kind":"route","situation":{},"choices":[{"id":"reject","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"reject","action":"reject"}},
+{"id":"context-ceiling","probe_kind":"route","situation":{},"choices":[{"id":"ceiling","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"ceiling","action":"reject"}},
+{"id":"unknown-context","probe_kind":"route","situation":{},"choices":[{"id":"unknown","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"unknown","action":"withhold-pass"}}
+],"relations":[]}

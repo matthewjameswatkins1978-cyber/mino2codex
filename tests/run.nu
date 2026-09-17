@@ -136,6 +136,15 @@ let results = [
         assert-equal $summary.final_text "done" "final text"
         let failed = (worker-summary [] "mimo-v2.5" null null 1 1 false)
         assert-equal $failed.status "failed" "empty worker output fails closed"
+        let zero_output = (worker-summary [] "mimo-v2.5" null null 1 0 false)
+        assert-equal $zero_output.status "failed" "zero exit without completion evidence is not success"
+        let tool_error = [{type: "tool_use", part: {tool: "edit", state: {status: "error", input: {filePath: "src/a.nu"}}}}]
+        let failed_tool = (worker-summary $tool_error "mimo-v2.5" null null 1 0 false)
+        assert-equal $failed_tool.status "failed" "tool failure is not success"
+        let incomplete = [{type: "text", part: {text: "finished"}}]
+        assert-equal (worker-summary $incomplete "mimo-v2.5" null null 1 0 false).status "failed" "missing completion signal fails closed"
+        let malformed = (parse-worker-events "not-json\n{bad}\n{\"type\":\"tool_use\"")
+        assert-equal ($malformed | length) 0 "malformed and scalar worker lines are discarded"
     })
     (test "telemetry derives timing and tool aggregates without content" {
         let started = ((date now) - 5sec)
