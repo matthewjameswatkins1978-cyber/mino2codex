@@ -496,12 +496,12 @@ def result-envelope [summary: record agent: string] {
     $summary | insert agent $agent
 }
 
-def worker-run [model: string prompt: string workstream: any packet: any session_id: any quiet: bool = false agent: string = "build" fork: bool = false] {
+def worker-run [model: string prompt: string workstream: any packet: any session_id: any quiet: bool = false agent: string = "build" fork: bool = false cwd: any = null] {
     let opencode = (opencode-path)
     if ($opencode | is-empty) { error make {msg: "OpenCode is not installed. Run: npm install -g opencode-ai"} }
     let credential = (credential-info)
     if $credential.status != "configured" { error make {msg: "MiMo Token Plan credential is not configured. Run: m2c setup"} }
-    let cwd = (pwd | path expand)
+    let cwd = (if ($cwd != null) { $cwd | path expand } else { pwd | path expand })
     let job_id = (worker-job-id)
     let raw_path = (job-root | path join $"($job_id).jsonl")
     let stderr_path = (job-root | path join $"($job_id).stderr")
@@ -768,6 +768,8 @@ def print-help [] {
     print "  m2c checkpoint --workstream NAME  checkpoint a workstream"
     print "  m2c codex [standard|pro]  experimental direct Codex route"
     print "  m2c key status      show credential status without revealing it"
+    print "  m2c watch           watch GitHub for queued jobs and run them"
+    print "  m2c watch --once    check for one job, process it, then exit"
     print "  m2c key replace     replace the locally stored credential"
     print "  m2c key remove      remove the locally stored credential"
     print "  m2c uninstall       remove the installed command, state and m2c skill"
@@ -838,6 +840,7 @@ def doctor [args: list<string> = []] {
         (check-row "Direct Codex tools" "KNOWN FAIL" "MiMo Responses compatibility issue")
         (check-row "OpenCode worker" $worker_live (if $live { "standard live check" } else { "use --live" }))
         (check-row "Recommended backend" "PASS" "OpenCode")
+        (check-row "GitHub CLI (gh)" (if (watch-gh-available) { "PASS" } else { "MISSING" }) (if (watch-gh-available) { "authenticated for m2c watch" } else { "not found or not authed" }))
     ]
     print ($rows | table)
     let required = ($rows | where {|row| not ($row.check in ["Codex", "Direct Codex tools", "Direct Codex inference", "OpenCode worker"])} | all {|row| ($row.status == "PASS") or (($row.check == "Credential") and ($row.status == "configured"))})
@@ -938,6 +941,246 @@ def key-command [args: list<string>] {
     } else { error make {msg: "Unknown key command. Use status, replace, or remove."} }
 }
 
+def watch-gh-available [] {
+    let found = (which gh | get path? | first | default "")
+    if ($found | is-empty) { false } else {
+        let result = (do { run-external "gh" "auth" "status" } | complete)
+        $result.exit_code == 0
+    }
+}
+
+def watch-gh-login [] {
+    let result = (do { run-external "gh" "api" "user" "--jq" ".login" } | complete)
+    if $result.exit_code != 0 { error make {msg: "gh auth failed or unavailable. Run: gh auth login"} }
+    $result.stdout | str trim
+}
+
+def watch-gh-parse-front-matter [body: string] {
+    let lines = ($body | lines)
+    if (($lines | first | default "") != "---") { null } else {
+        let closing = ($lines | enumerate | where {|item| $item.item == "---"} | skip 1 | first)
+        if ($closing == null) { null } else {
+            mut result = {}
+            for line in ($lines | skip 1 | first ($closing.index - 1)) {
+                let match = ($line | parse --regex '^(?<key>[a-zA-Z0-9_]+)\s*:\s*(?<value>.+)$')
+                if (($match | length) > 0) {
+                    let key = ($match.0.key | str trim)
+                    let value = ($match.0.value | str trim)
+                    $result = ($result | upsert $key $value)
+                }
+            }
+            $result
+        }
+    }
+}
+
+def watch-validate-packet [fm: record] {
+    let m2c_job = ($fm | get -o "m2c_job" | default "")
+    if $m2c_job != "1" { {ok: false, reason: $"m2c_job must be 1, got ($m2c_job)"} } else {
+        let base = ($fm | get -o "base" | default "")
+        if ($base | str length) != 40 { {ok: false, reason: $"base must be a 40-char SHA, got ($base | str length) chars"} } else {
+            let branch = ($fm | get -o "branch" | default "")
+            if ($branch == "main") or ($branch == "master") { {ok: false, reason: $"target branch cannot be main or master, got ($branch)"} } else if ($branch | is-empty) { {ok: false, reason: "branch field is required"} } else {
+                let model_str = ($fm | get -o "model" | default "")
+                let model = (watch-parse-model $model_str)
+                if ($model == null) { {ok: false, reason: $"invalid model ($model_str); must be standard or pro"} } else {
+                    {ok: true, base: $base, branch: $branch, model: $model}
+                }
+            }
+        }
+    }
+}
+
+def watch-gh-find-job [login: string] {
+    let result = (do { run-external "gh" "search" "issues" "--owner" $login "--state" "open" "--limit" "10" "--json" "repository,title,number,url" } | complete)
+    if $result.exit_code != 0 { [] } else {
+        let issues = (try { $result.stdout | from json } catch { [] })
+        $issues | where {|issue| ($issue.title | str starts-with "[M2C QUEUED]")}
+    }
+}
+
+def watch-parse-model [value: string] {
+    let trimmed = ($value | str trim | str trim --char '"')
+    if $trimmed in ["standard", "pro"] { $trimmed } else { null }
+}
+
+def watch-admit-job [issue: record login: string] {
+    let repo_full = ($issue.repository.nameWithOwner? | default $issue.repository.name)
+    let body_result = (do { run-external "gh" "issue" "view" ($issue.number | into string) "--repo" $repo_full "--json" "body,author" } | complete)
+    if $body_result.exit_code != 0 { {ok: false, reason: "failed to fetch issue body"} } else {
+        let detail = (try { $body_result.stdout | from json } catch { null })
+        if ($detail == null) { {ok: false, reason: "failed to parse issue data"} } else {
+            let author = ($detail.author.login? | default "")
+            if $author != $login { {ok: false, reason: $"issue author ($author) does not match authenticated user ($login)"} } else {
+                let owner = ($repo_full | split row "/" | first)
+                if $owner != $login { {ok: false, reason: $"repository owner ($owner) does not match authenticated user ($login)"} } else {
+                    let fm = (watch-gh-parse-front-matter $detail.body)
+                    if ($fm == null) { {ok: false, reason: "missing or malformed front matter (must start with ---)"} } else {
+                        let validation = (watch-validate-packet $fm)
+                        if (not $validation.ok) { $validation } else {
+                            let body_lines = ($detail.body | lines)
+                            let fm_end = ($body_lines | enumerate | where {|item| $item.item == "---"} | skip 1 | first)
+                            let packet = (if ($fm_end == null) { "" } else { $detail.body | lines | skip ($fm_end.index + 1) | str join "\n" | str trim })
+                            if ($packet | is-empty) { {ok: false, reason: "no worker packet after front matter"} } else {
+                                {ok: true, base: $validation.base, branch: $validation.branch, model: $validation.model, packet: $packet, owner: $owner, repo: $repo_full, number: $issue.number, title: $issue.title, url: $issue.url}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+def watch-claim-job [repo: string number: int] {
+    let result = (do { run-external "gh" "issue" "edit" ($number | into string) "--repo" $repo "--title" "[M2C RUNNING]" } | complete)
+    $result.exit_code == 0
+}
+
+def watch-update-title [repo: string number: int title: string] {
+    let _ = (do { run-external "gh" "issue" "edit" ($number | into string) "--repo" $repo "--title" $title | complete })
+}
+
+def watch-add-comment [repo: string number: int body: string] {
+    let result = (do { run-external "gh" "issue" "comment" ($number | into string) "--repo" $repo "--body" $body } | complete)
+    $result.exit_code == 0
+}
+
+def watch-run-worker-in-job [job_dir: path job: record] {
+    let repo_url = $"https://github.com/($job.repo).git"
+    let clone_dir = ($job_dir | path join "repo")
+    let _ = (do { run-external "git" "clone" $repo_url $clone_dir } | complete)
+    let checkout = (do { run-external "git" "-C" $clone_dir "checkout" $job.base } | complete)
+    if $checkout.exit_code != 0 { error make {msg: $"failed to checkout base SHA ($job.base)"} }
+    let branch_create = (do { run-external "git" "-C" $clone_dir "checkout" "-b" $job.branch } | complete)
+    if $branch_create.exit_code != 0 {
+        let switch = (do { run-external "git" "-C" $clone_dir "checkout" $job.branch } | complete)
+        if $switch.exit_code != 0 { error make {msg: $"failed to create or switch to branch ($job.branch)"} }
+    }
+    let model_id = (if $job.model == "standard" { (provider-data).models.standard } else { (provider-data).models.pro })
+    let prompt = $"($job.packet)\n\nReturn a concise completion report with files changed, tests run and results, unresolved issues, and any evidence needed for verification."
+    let agent = (worker-agent $job.packet)
+    let run = (worker-run $model_id $prompt null null null true $agent false $clone_dir)
+    {summary: $run.summary, clone_dir: $clone_dir}
+}
+
+def watch-verify-delivery [clone_dir: path job: record] {
+    let local_branch = (try { (run-external "git" "-C" $clone_dir "branch" "--show-current" | complete).stdout | str trim } catch { "" })
+    let local_sha = (try { (run-external "git" "-C" $clone_dir "rev-parse" "HEAD" | complete).stdout | str trim } catch { "" })
+    let status_raw = (try { (run-external "git" "-C" $clone_dir "status" "--porcelain" | complete).stdout | str trim } catch { "" })
+    let worktree_clean = ($status_raw | is-empty)
+    let remote_exists = (try {
+        let r = (run-external "git" "-C" $clone_dir "ls-remote" "--heads" "origin" $job.branch | complete)
+        $r.exit_code == 0 and ($r.stdout | str trim | is-not-empty)
+    } catch { false })
+    let remote_sha = (try {
+        let r = (run-external "git" "-C" $clone_dir "ls-remote" "--heads" "origin" $job.branch | complete)
+        if $r.exit_code != 0 { "" } else {
+            let parts = ($r.stdout | str trim | split row "\t")
+            if (($parts | length) >= 1) { $parts.0 } else { "" }
+        }
+    } catch { "" })
+    let sha_match = ($remote_sha != "") and ($local_sha == $remote_sha)
+    {
+        local_branch: $local_branch
+        local_sha: $local_sha
+        worktree_clean: $worktree_clean
+        remote_exists: $remote_exists
+        remote_sha: $remote_sha
+        sha_match: $sha_match
+    }
+}
+
+def watch-build-result-comment [summary: record delivery: record model: string final_status: string] {
+    let status = $final_status
+    let exit_code = ($summary.exit_code? | default 1)
+    let worktree_status = (if $delivery.worktree_clean { "CLEAN" } else { "DIRTY" })
+    let remote_status = (if $delivery.sha_match { "MATCH" } else { "MISMATCH" })
+    let reasons = [
+        (if (not $delivery.worktree_clean) { "worktree is dirty" } else { "" })
+        (if (not $delivery.remote_exists) { $"remote branch ($delivery.local_branch) does not exist" } else { "" })
+        (if (not $delivery.sha_match) and $delivery.remote_exists { $"remote SHA ($delivery.remote_sha) != local SHA ($delivery.local_sha)" } else { "" })
+        (if $summary.status != "completed" { $"worker status: ($summary.status)" } else { "" })
+    ] | where {|r| ($r | is-not-empty)}
+    let reason_line = (if (($reasons | length) > 0) { $"Reasons: ($reasons | str join "; ")" } else { "" })
+    [
+        $"M2C RESULT: ($status)"
+        $"model: ($model)"
+        $"branch: ($delivery.local_branch)"
+        $"sha: ($delivery.local_sha)"
+        $"exit: ($exit_code)"
+        $"worktree: ($worktree_status)"
+        $"remote: ($remote_status)"
+        ""
+        $reason_line
+    ] | where {|line| ($line | is-not-empty)} | str join "\n"
+}
+
+def watch-exit-for [summary: record] {
+    if ($summary.status == "completed") { 0 } else { 1 }
+}
+
+def watch-command [args: list<string>] {
+    let once = ($args | any {|arg| $arg == "--once"})
+    let login = (watch-gh-login)
+    print $"Watching as ($login). Polling every 12 seconds."
+    mut running = false
+    mut iterations = 0
+    while true {
+        $iterations = $iterations + 1
+        if (not $running) {
+            let jobs = (watch-gh-find-job $login)
+            if (($jobs | length) > 0) {
+                let job = ($jobs | first)
+                let admission = (watch-admit-job $job $login)
+                if $admission.ok {
+                    print $"Claiming job: ($job.title)"
+                    if (watch-claim-job $job.repo $job.number) {
+                        $running = true
+                        let job_id = (worker-job-id)
+                        let job_dir = (job-root | path join $"watch-($job_id)")
+                        mkdir $job_dir
+                        print $"Job dir: ($job_dir)"
+                        print $"Base: ($admission.base)"
+                        print $"Branch: ($admission.branch)"
+                        print $"Model: ($admission.model)"
+                        let run_result = (try {
+                            watch-run-worker-in-job $job_dir $admission
+                        } catch {|err|
+                            {summary: {status: "failed", exit_code: 1, final_text: ($err.msg? | default "worker error")}, clone_dir: null}
+                        })
+                        let delivery = (if ($run_result.clone_dir != null) {
+                            watch-verify-delivery $run_result.clone_dir $admission
+                        } else {
+                            {local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false}
+                        })
+                        let can_be_done = ($run_result.summary.status == "completed") and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match
+                        let final_status = (if $can_be_done { "DONE" } else { "FAILED" })
+                        let final_title = $"[M2C ($final_status)]"
+                        watch-update-title $job.repo $job.number $final_title
+                        let comment = (watch-build-result-comment $run_result.summary $delivery $admission.model $final_status)
+                        watch-add-comment $job.repo $job.number $comment
+                        print $"Job ($final_status). Title: ($final_title)"
+                        $running = false
+                    } else {
+                        print "Failed to claim job."
+                        $running = false
+                    }
+                } else {
+                    print $"Job rejected: ($admission.reason)"
+                    watch-update-title $job.repo $job.number "[M2C BLOCKED]"
+                    watch-add-comment $job.repo $job.number $"Rejection reason: ($admission.reason)"
+                }
+            }
+        }
+        if $once { break }
+        if (not $running) {
+            try { sleep 12sec } catch { break }
+        }
+    }
+    print "Watch stopped."
+}
+
 def uninstall [] {
     print "This removes only mimo2codex's installed command, isolated state and skill."
         let answer = ((input "Type REMOVE to continue: ") | str trim)
@@ -954,7 +1197,7 @@ export def version [] { print (version-value) }
 
 export def invoke [...args: string] {
     let command = ($args | first | default "")
-    if $command in ["help", "--help", "-h"] { print-help } else if $command == "version" { version } else if $command == "models" { model-records | table } else if $command == "setup" { setup } else if $command == "doctor" { doctor ($args | skip 1) } else if $command == "key" { key-command ($args | skip 1) } else if $command == "checkpoint" { checkpoint-command ($args | skip 1) } else if $command == "uninstall" { uninstall } else if $command == "codex" {
+    if $command in ["help", "--help", "-h"] { print-help } else if $command == "version" { version } else if $command == "models" { model-records | table } else if $command == "setup" { setup } else if $command == "doctor" { doctor ($args | skip 1) } else if $command == "key" { key-command ($args | skip 1) } else if $command == "checkpoint" { checkpoint-command ($args | skip 1) } else if $command == "watch" { watch-command ($args | skip 1) } else if $command == "uninstall" { uninstall } else if $command == "codex" {
         let rest = ($args | skip 1)
         let selected = ($rest | first | default "pro")
         if $selected == "standard" { launch-codex (provider-data).models.standard ($rest | skip 1) } else if $selected == "pro" { launch-codex (provider-data).models.pro ($rest | skip 1) } else { launch-codex (provider-data).models.pro $rest }

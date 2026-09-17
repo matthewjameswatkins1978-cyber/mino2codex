@@ -267,10 +267,356 @@ let results = [
         assert (console-meaningful-event {type: "tool_use", part: {tool: "bash", state: {status: "completed", input: {command: "cargo test"}}}}) "verification refresh"
         assert (not (console-meaningful-event {type: "text", part: {text: "working"}})) "ordinary text waits for cadence"
     })
+    # --- watch front matter parsing ---
+    (test "watch front matter parses valid YAML block" {
+        let body = "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\nmodel: standard\n---\nDo the work here."
+        let fm = (watch-gh-parse-front-matter $body)
+        assert ($fm != null) "front matter found"
+        assert-equal $fm.m2c_job "1" "m2c_job"
+        assert-equal $fm.base "abcdef0123456789abcdef0123456789abcdef02" "base sha"
+        assert-equal $fm.branch "feature/test" "branch"
+        assert-equal $fm.model "standard" "model"
+    })
+    (test "watch front matter rejects body without opening ---" {
+        let body = "m2c_job: 1\nbase: abc\nDo work."
+        let fm = (watch-gh-parse-front-matter $body)
+        assert ($fm == null) "no front matter without ---"
+    })
+    (test "watch front matter rejects body without closing ---" {
+        let body = "---\nm2c_job: 1\nbase: abc\nDo work."
+        let fm = (watch-gh-parse-front-matter $body)
+        assert ($fm == null) "no front matter without closing ---"
+    })
+    (test "watch front matter handles empty front matter block" {
+        let body = "---\n---\nJust a packet."
+        let fm = (watch-gh-parse-front-matter $body)
+        assert ($fm != null) "empty front matter parses"
+        assert ($fm | columns | is-empty) "no keys in empty block"
+    })
+    # --- watch model validation ---
+    (test "watch parse model accepts standard and pro" {
+        assert-equal (watch-parse-model "standard") "standard" "standard model"
+        assert-equal (watch-parse-model "pro") "pro" "pro model"
+        assert-equal (watch-parse-model "  standard  ") "standard" "trimmed standard"
+        assert-equal (watch-parse-model '"pro"') "pro" "quoted pro"
+    })
+    (test "watch parse model rejects invalid values" {
+        assert ((watch-parse-model "turbo") | is-empty) "turbo rejected"
+        assert ((watch-parse-model "") | is-empty) "empty rejected"
+        assert ((watch-parse-model "mimo-v2.5") | is-empty) "raw model name rejected"
+    })
+    # --- watch admission rules via watch-validate-packet ---
+    (test "watch validate rejects main branch target" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "main", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "main branch rejected"
+        assert ($result.reason | str contains "main") "reason mentions main"
+    })
+    (test "watch validate rejects master branch target" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "master", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "master branch rejected"
+    })
+    (test "watch validate rejects bad base SHA" {
+        let fm = {m2c_job: "1", base: "short", branch: "feature/test", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "short base rejected"
+        assert ($result.reason | str contains "40-char") "reason mentions SHA length"
+    })
+    (test "watch validate rejects missing m2c_job" {
+        let fm = {base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "missing m2c_job rejected"
+        assert ($result.reason | str contains "m2c_job") "reason mentions m2c_job"
+    })
+    (test "watch validate rejects invalid model" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "turbo"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "invalid model rejected"
+        assert ($result.reason | str contains "standard or pro") "reason mentions valid models"
+    })
+    (test "watch validate rejects empty branch" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "empty branch rejected"
+    })
+    (test "watch validate accepts valid complete job" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "pro"}
+        let result = (watch-validate-packet $fm)
+        assert $result.ok "valid job accepted"
+        assert-equal $result.model "pro" "model parsed"
+        assert-equal $result.branch "feature/test" "branch extracted"
+    })
+    (test "watch validate m2c_job must be exactly 1" {
+        let fm1 = {m2c_job: "2", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard"}
+        assert (not (watch-validate-packet $fm1).ok) "m2c_job 2 rejected"
+        let fm0 = {m2c_job: "0", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard"}
+        assert (not (watch-validate-packet $fm0).ok) "m2c_job 0 rejected"
+    })
+    # --- watch result comment ---
+    (test "watch build result comment for DONE" {
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "DONE")
+        assert ($comment | str contains "M2C RESULT: DONE") "DONE status"
+        assert ($comment | str contains "model: standard") "model line"
+        assert ($comment | str contains "branch: mimo/test") "branch line"
+        assert ($comment | str contains "sha: abc123") "sha line"
+        assert ($comment | str contains "exit: 0") "exit code"
+        assert ($comment | str contains "worktree: CLEAN") "worktree clean"
+        assert ($comment | str contains "remote: MATCH") "remote match"
+    })
+    (test "watch build result comment for FAILED includes reasons" {
+        let summary = {status: "failed", exit_code: 1}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false}
+        let comment = (watch-build-result-comment $summary $delivery "pro" "FAILED")
+        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED status"
+        assert ($comment | str contains "model: pro") "model line"
+        assert ($comment | str contains "worktree: DIRTY") "worktree dirty"
+        assert ($comment | str contains "remote: MISMATCH") "remote mismatch"
+        assert ($comment | str contains "worktree is dirty") "dirty reason"
+        assert ($comment | str contains "remote branch") "missing remote reason"
+        assert ($comment | str contains "worker status: failed") "worker failure reason"
+    })
+    (test "watch build result comment for timeout status" {
+        let summary = {status: "timed_out", exit_code: 124}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
+        assert ($comment | str contains "M2C RESULT: FAILED") "timeout becomes FAILED"
+        assert ($comment | str contains "worker status: timed_out") "timeout reason"
+    })
+    # --- watch exit code ---
+    (test "watch exit for completed is 0" {
+        assert-equal (watch-exit-for {status: "completed", exit_code: 0}) 0 "completed exits 0"
+        assert-equal (watch-exit-for {status: "failed", exit_code: 1}) 1 "failed exits 1"
+        assert-equal (watch-exit-for {status: "timed_out", exit_code: 124}) 1 "timed_out exits 1"
+        assert-equal (watch-exit-for {status: "cancelled", exit_code: 130}) 1 "cancelled exits 1"
+    })
+    # --- watch delivery verification with real git ---
+    (test "watch verify delivery with clean push matches" {
+        let repo_dir = ($test_root | path join "verify-repo")
+        let clone_dir = ($test_root | path join "verify-clone")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" | complete) | ignore
+        let work = ($test_root | path join "verify-work")
+        mkdir $work
+        (run-external "git" "clone" $repo_dir $work | complete) | ignore
+        ("# test" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/test" | complete) | ignore
+        ("# change" | save --force ($work | path join "CHANGE.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "work" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/test" | complete) | ignore
+        let local_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let job = {branch: "mimo/test", repo: "user/repo"}
+        let delivery = (watch-verify-delivery $work $job)
+        assert-equal $delivery.local_branch "mimo/test" "branch detected"
+        assert-equal $delivery.local_sha $local_sha "local sha"
+        assert $delivery.worktree_clean "clean worktree"
+        assert $delivery.remote_exists "remote exists"
+        assert $delivery.sha_match "sha matches"
+    })
+    (test "watch verify delivery detects dirty worktree" {
+        let repo_dir = ($test_root | path join "dirty-repo")
+        let clone_dir = ($test_root | path join "dirty-clone")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" | complete) | ignore
+        let work = ($test_root | path join "dirty-work")
+        mkdir $work
+        (run-external "git" "clone" $repo_dir $work | complete) | ignore
+        ("# test" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/test" | complete) | ignore
+        ("# uncommitted" | save --force ($work | path join "UNCOMMITTED.md"))
+        (run-external "git" "-C" $work "add" "UNCOMMITTED.md" | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "work" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/test" | complete) | ignore
+        ("dirty change" | save --force ($work | path join "DIRTY.txt"))
+        let job = {branch: "mimo/test", repo: "user/repo"}
+        let delivery = (watch-verify-delivery $work $job)
+        assert (not $delivery.worktree_clean) "dirty worktree detected"
+    })
+    (test "watch verify delivery detects missing remote branch" {
+        let repo_dir = ($test_root | path join "noremote-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" | complete) | ignore
+        let work = ($test_root | path join "noremote-work")
+        mkdir $work
+        (run-external "git" "clone" $repo_dir $work | complete) | ignore
+        ("# test" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/test" | complete) | ignore
+        ("# change" | save --force ($work | path join "CHANGE.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "work" | complete) | ignore
+        let job = {branch: "mimo/test", repo: "user/repo"}
+        let delivery = (watch-verify-delivery $work $job)
+        assert (not $delivery.remote_exists) "missing remote branch detected"
+        assert (not $delivery.sha_match) "no sha match without remote"
+    })
+    (test "watch verify delivery detects SHA mismatch" {
+        let repo_dir = ($test_root | path join "mismatch-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" | complete) | ignore
+        let work = ($test_root | path join "mismatch-work")
+        mkdir $work
+        (run-external "git" "clone" $repo_dir $work | complete) | ignore
+        ("# test" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/test" | complete) | ignore
+        ("# change" | save --force ($work | path join "CHANGE.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "pushed" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/test" | complete) | ignore
+        ("# local only" | save --force ($work | path join "LOCAL.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "local" | complete) | ignore
+        let job = {branch: "mimo/test", repo: "user/repo"}
+        let delivery = (watch-verify-delivery $work $job)
+        assert $delivery.remote_exists "remote exists"
+        assert (not $delivery.sha_match) "sha mismatch detected"
+        assert $delivery.worktree_clean "worktree is clean after commit"
+    })
+    # --- issue body preservation ---
+    (test "watch front matter preserves packet content" {
+        let original_body = "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\nmodel: standard\n---\nOriginal packet content with special chars: !@#$%^&*()."
+        let fm = (watch-gh-parse-front-matter $original_body)
+        assert ($fm != null) "front matter found"
+        let lines = ($original_body | lines)
+        let fm_end = ($lines | enumerate | where {|item| $item.item == "---"} | skip 1 | first)
+        let packet = ($original_body | lines | skip ($fm_end.index + 1) | str join "\n" | str trim)
+        assert ($packet | str contains "Original packet content") "packet preserved"
+        assert ($packet | str contains "!@#$%^&*().") "special chars preserved"
+    })
+    # --- --once flag parsing ---
+    (test "watch --once is parsed from args" {
+        let args = ["--once"]
+        let once = ($args | any {|arg| $arg == "--once"})
+        assert $once "--once detected"
+        let args2 = ["--verbose" "--poll"]
+        let once2 = ($args2 | any {|arg| $arg == "--once"})
+        assert (not $once2) "--once not present"
+    })
+    # --- fix #1: worker-run cwd parameter ---
+    (test "worker-run accepts cwd parameter for isolated clone" {
+        let target = ($test_root | path join "target-clone")
+        let cwd_cmd = (worker-command "mimo-v2.5" "task" null $target)
+        let dir_idx = ($cwd_cmd | enumerate | where item == "--dir" | first | get index)
+        assert (($cwd_cmd | get ($dir_idx + 1)) == ($target | path expand)) "cwd passed to opencode --dir"
+        let default_cmd = (worker-command "mimo-v2.5" "task" null $project_root)
+        let default_dir_idx = ($default_cmd | enumerate | where item == "--dir" | first | get index)
+        assert (($default_cmd | get ($default_dir_idx + 1)) == ($project_root | path expand)) "default cwd is project root"
+    })
+    (test "worker-command passes explicit cwd through" {
+        let clone = ($test_root | path join "some-repo-clone")
+        let cmd = (worker-command "mimo-v2.5" "test prompt" null $clone)
+        let dir_idx = ($cmd | enumerate | where item == "--dir" | first | get index)
+        assert (($cmd | get ($dir_idx + 1)) == ($clone | path expand)) "clone dir in command"
+    })
+    # --- fix #2: gh search uses explicit flags and nameWithOwner ---
+    (test "watch gh search uses explicit owner and state flags" {
+        let login = "testuser"
+        let query_parts = ["gh" "search" "issues" "--owner" $login "--state" "open" "--limit" "10" "--json" "repository,title,number,url"]
+        assert (($query_parts | str join " ") | str contains "--owner testuser") "explicit --owner flag"
+        assert (($query_parts | str join " ") | str contains "--state open") "explicit --state flag"
+        assert (not (($query_parts | str join " ") | str contains "repo:testuser/*")) "no query-embedded repo qualifier"
+    })
+    (test "owner extracted from nameWithOwner not bare name" {
+        let issue_with_nwo = {repository: {nameWithOwner: "alice/my-repo", name: "my-repo"}, title: "[M2C QUEUED] test", number: 1, url: "https://github.com/alice/my-repo/issues/1"}
+        let repo_full = ($issue_with_nwo.repository.nameWithOwner? | default $issue_with_nwo.repository.name)
+        let owner = ($repo_full | split row "/" | first)
+        assert-equal $owner "alice" "owner from nameWithOwner"
+        assert-equal $repo_full "alice/my-repo" "full identity preserved"
+        let issue_bare = {repository: {name: "bare-name"}, title: "[M2C QUEUED] test", number: 2, url: "https://github.com/x/bare-name/issues/2"}
+        let repo_fallback = ($issue_bare.repository.nameWithOwner? | default $issue_bare.repository.name)
+        assert-equal $repo_fallback "bare-name" "fallback to bare name when nameWithOwner absent"
+    })
+    (test "watch admit job uses full owner/repo for --repo flag" {
+        let issue = {repository: {nameWithOwner: "alice/my-repo", name: "my-repo"}, title: "[M2C QUEUED] test", number: 5, url: "https://github.com/alice/my-repo/issues/5"}
+        let repo_full = ($issue.repository.nameWithOwner? | default $issue.repository.name)
+        assert-equal $repo_full "alice/my-repo" "full identity used for gh issue view --repo"
+        let owner = ($repo_full | split row "/" | first)
+        assert-equal $owner "alice" "owner check uses first segment of owner/repo"
+    })
+    # --- fix #3: rejected jobs become BLOCKED ---
+    (test "rejected queued job transitions to BLOCKED" {
+        let blocked_title = "[M2C BLOCKED]"
+        assert ($blocked_title | str starts-with "[M2C BLOCKED]") "BLOCKED title format"
+        assert ($blocked_title | str ends-with "]") "BLOCKED title bracketed"
+        assert (not ($blocked_title | str contains "QUEUED")) "BLOCKED does not contain QUEUED"
+    })
+    (test "BLOCKED title prevents rediscovery as queued" {
+        let blocked_title = "[M2C BLOCKED]"
+        assert (not ($blocked_title | str starts-with "[M2C QUEUED]")) "BLOCKED not matched by queued filter"
+    })
+    (test "rejection comment includes reason" {
+        let reason = "issue author (bot) does not match authenticated user (alice)"
+        let comment = $"Rejection reason: ($reason)"
+        assert ($comment | str contains "Rejection reason:") "comment has reason prefix"
+        assert ($comment | str contains "does not match") "reason detail included"
+    })
+    # --- fix #4: result comment uses final delivery gate ---
+    (test "watch build result comment DONE when delivery matches" {
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "DONE")
+        assert ($comment | str contains "M2C RESULT: DONE") "DONE when worker completed and delivery matches"
+        assert (not ($comment | str contains "FAILED")) "no FAILED when done"
+    })
+    (test "watch build result comment FAILED when SHA mismatch" {
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {local_branch: "mimo/test", local_sha: "local123", worktree_clean: true, remote_exists: true, remote_sha: "remote456", sha_match: false}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
+        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when SHA mismatch"
+        assert ($comment | str contains "remote SHA remote456 != local SHA local123") "mismatch detail"
+    })
+    (test "watch build result comment FAILED when remote missing" {
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: false, remote_sha: "", sha_match: false}
+        let comment = (watch-build-result-comment $summary $delivery "pro" "FAILED")
+        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when remote missing"
+        assert ($comment | str contains "remote branch mimo/test does not exist") "missing remote reason"
+    })
+    (test "watch build result comment FAILED when timed out" {
+        let summary = {status: "timed_out", exit_code: 124}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
+        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when timed out"
+        assert ($comment | str contains "worker status: timed_out") "timeout reason"
+    })
+    (test "watch build result comment FAILED when cancelled" {
+        let summary = {status: "cancelled", exit_code: 130}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
+        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when cancelled"
+        assert ($comment | str contains "worker status: cancelled") "cancel reason"
+    })
+    (test "watch build result comment FAILED when worker failed even with clean delivery" {
+        let summary = {status: "failed", exit_code: 1}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
+        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when worker failed"
+        assert ($comment | str contains "worker status: failed") "worker failure reason"
+    })
 ]
 
 print ($results | table)
 let failed = ($results | where status == "FAIL" | length)
-if $failed > 0 { error make {msg: $"($failed) tests failed"} }
+if $failed > 0 {
+    let failures = ($results | where status == "FAIL")
+    for f in $failures {
+        print $"FAIL: ($f.name) - ($f.detail)"
+    }
+    error make {msg: $"($failed) tests failed"}
+}
 print $"($results | length) passed, 0 failed"
 rm --recursive --force $test_root
