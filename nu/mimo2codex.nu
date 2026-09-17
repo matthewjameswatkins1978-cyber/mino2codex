@@ -22,7 +22,7 @@ def skill-root [] {
     if ($env.MIMO2CODEX_SKILL_ROOT? | is-not-empty) {
         $env.MIMO2CODEX_SKILL_ROOT | path expand
     } else {
-        let codex_home = ($env.CODEX_HOME? | default ($nu.home-path | path join ".codex"))
+        let codex_home = ($env.CODEX_HOME? | default ($nu.home-dir | path join ".codex"))
         $codex_home | path expand | path join "skills"
     }
 }
