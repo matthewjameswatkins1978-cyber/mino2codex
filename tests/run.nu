@@ -161,6 +161,15 @@ let results = [
         assert-equal $telemetry.verification_commands_count 1 "verification aggregate"
         assert (($telemetry.time_to_first_tool_seconds | into float) >= 1.0) "first tool timing"
         assert (not (($telemetry.records | to json) | str contains "secret.txt")) "telemetry has no file content"
+        let commands = ["grep -qxF AFTER fixture.txt" "cargo test" "cargo check" "nu tests/run.nu" "sha256sum -c SHA256SUMS"]
+        for command in $commands { assert (telemetry-verification-command {type: "tool_use", part: {tool: "bash", state: {input: {command: $command}}}}) $"verification command recognized: ($command)" }
+        assert (not (telemetry-verification-command {type: "tool_use", part: {tool: "bash", state: {input: {command: "printf ordinary output"}}}})) "ordinary shell command is not verification"
+        let ordered = (telemetry-derived [
+            {type: "tool_use", timestamp: ($start_ms + 3000), part: {tool: "bash", state: {status: "completed", input: {command: "cargo test"}}}}
+            {type: "tool_use", timestamp: ($start_ms + 2000), part: {tool: "edit", state: {status: "completed", input: {filePath: "a"}}}}
+        ] $started (date now)).records
+        assert-equal $ordered.1.event "tool_end" "chronological telemetry event order"
+        assert-equal $ordered.1.t 2.0 "chronological telemetry timestamp"
     })
     (test "context threshold policy" {
         assert-equal (checkpoint-state {context_percent: 29.9}) "normal" "normal"
