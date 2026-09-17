@@ -508,17 +508,19 @@ let results = [
     })
     # --- fix #1: worker-run cwd parameter ---
     (test "worker-run accepts cwd parameter for isolated clone" {
-        let cwd_cmd = (worker-command "mimo-v2.5" "task" null "/tmp/target-clone")
-        let cmd_str = ($cwd_cmd | str join " ")
-        assert ($cmd_str | str contains "--dir /tmp/target-clone") "cwd passed to opencode --dir"
+        let target = ($test_root | path join "target-clone")
+        let cwd_cmd = (worker-command "mimo-v2.5" "task" null $target)
+        let dir_idx = ($cwd_cmd | enumerate | where item == "--dir" | first | get index)
+        assert (($cwd_cmd | get ($dir_idx + 1)) == ($target | path expand)) "cwd passed to opencode --dir"
         let default_cmd = (worker-command "mimo-v2.5" "task" null $project_root)
-        let default_str = ($default_cmd | str join " ")
-        assert ($default_str | str contains $"--dir ($project_root)") "default cwd is project root"
+        let default_dir_idx = ($default_cmd | enumerate | where item == "--dir" | first | get index)
+        assert (($default_cmd | get ($default_dir_idx + 1)) == ($project_root | path expand)) "default cwd is project root"
     })
     (test "worker-command passes explicit cwd through" {
-        let clone = "/tmp/some-repo-clone"
+        let clone = ($test_root | path join "some-repo-clone")
         let cmd = (worker-command "mimo-v2.5" "test prompt" null $clone)
-        assert (($cmd | str join " ") | str contains $"--dir ($clone)") "clone dir in command"
+        let dir_idx = ($cmd | enumerate | where item == "--dir" | first | get index)
+        assert (($cmd | get ($dir_idx + 1)) == ($clone | path expand)) "clone dir in command"
     })
     # --- fix #2: gh search uses explicit flags and nameWithOwner ---
     (test "watch gh search uses explicit owner and state flags" {
