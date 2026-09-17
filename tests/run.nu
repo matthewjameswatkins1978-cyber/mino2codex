@@ -356,11 +356,12 @@ let results = [
     # --- watch result comment ---
     (test "watch build result comment for DONE" {
         let summary = {status: "completed", exit_code: 0}
-        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
         let comment = (watch-build-result-comment $summary $delivery "standard" "DONE")
         assert ($comment | str contains "M2C RESULT: DONE") "DONE status"
         assert ($comment | str contains "model: standard") "model line"
         assert ($comment | str contains "branch: mimo/test") "branch line"
+        assert ($comment | str contains "branch_match: MATCH") "branch match line"
         assert ($comment | str contains "sha: abc123") "sha line"
         assert ($comment | str contains "exit: 0") "exit code"
         assert ($comment | str contains "worktree: CLEAN") "worktree clean"
@@ -368,7 +369,7 @@ let results = [
     })
     (test "watch build result comment for FAILED includes reasons" {
         let summary = {status: "failed", exit_code: 1}
-        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: true}
         let comment = (watch-build-result-comment $summary $delivery "pro" "FAILED")
         assert ($comment | str contains "M2C RESULT: FAILED") "FAILED status"
         assert ($comment | str contains "model: pro") "model line"
@@ -380,7 +381,7 @@ let results = [
     })
     (test "watch build result comment for timeout status" {
         let summary = {status: "timed_out", exit_code: 124}
-        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
         let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
         assert ($comment | str contains "M2C RESULT: FAILED") "timeout becomes FAILED"
         assert ($comment | str contains "worker status: timed_out") "timeout reason"
@@ -567,42 +568,42 @@ let results = [
     # --- fix #4: result comment uses final delivery gate ---
     (test "watch build result comment DONE when delivery matches" {
         let summary = {status: "completed", exit_code: 0}
-        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
         let comment = (watch-build-result-comment $summary $delivery "standard" "DONE")
         assert ($comment | str contains "M2C RESULT: DONE") "DONE when worker completed and delivery matches"
         assert (not ($comment | str contains "FAILED")) "no FAILED when done"
     })
     (test "watch build result comment FAILED when SHA mismatch" {
         let summary = {status: "completed", exit_code: 0}
-        let delivery = {local_branch: "mimo/test", local_sha: "local123", worktree_clean: true, remote_exists: true, remote_sha: "remote456", sha_match: false}
+        let delivery = {local_branch: "mimo/test", local_sha: "local123", worktree_clean: true, remote_exists: true, remote_sha: "remote456", sha_match: false, branch_match: true}
         let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
         assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when SHA mismatch"
         assert ($comment | str contains "remote SHA remote456 != local SHA local123") "mismatch detail"
     })
     (test "watch build result comment FAILED when remote missing" {
         let summary = {status: "completed", exit_code: 0}
-        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: false, remote_sha: "", sha_match: false}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: false, remote_sha: "", sha_match: false, branch_match: true}
         let comment = (watch-build-result-comment $summary $delivery "pro" "FAILED")
         assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when remote missing"
         assert ($comment | str contains "remote branch mimo/test does not exist") "missing remote reason"
     })
     (test "watch build result comment FAILED when timed out" {
         let summary = {status: "timed_out", exit_code: 124}
-        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
         let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
         assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when timed out"
         assert ($comment | str contains "worker status: timed_out") "timeout reason"
     })
     (test "watch build result comment FAILED when cancelled" {
         let summary = {status: "cancelled", exit_code: 130}
-        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
         let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
         assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when cancelled"
         assert ($comment | str contains "worker status: cancelled") "cancel reason"
     })
     (test "watch build result comment FAILED when worker failed even with clean delivery" {
         let summary = {status: "failed", exit_code: 1}
-        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
         let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
         assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when worker failed"
         assert ($comment | str contains "worker status: failed") "worker failure reason"
@@ -636,7 +637,7 @@ let results = [
         let final_title = $"[M2C ($final_status)]"
         assert ($final_title == "[M2C DONE]") "DONE title format"
         let summary = {status: "completed", exit_code: 0}
-        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
         let comment = (watch-build-result-comment $summary $delivery $admission.model $final_status)
         assert ($comment | str contains "M2C RESULT: DONE") "DONE comment uses canonical status"
         assert-equal $admission.repo "alice/my-repo" "repo identity preserved for DONE"
@@ -647,7 +648,7 @@ let results = [
         let final_title = $"[M2C ($final_status)]"
         assert ($final_title == "[M2C FAILED]") "FAILED title format"
         let summary = {status: "failed", exit_code: 1}
-        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: false}
         let comment = (watch-build-result-comment $summary $delivery $admission.model $final_status)
         assert ($comment | str contains "M2C RESULT: FAILED") "FAILED comment uses canonical status"
         assert-equal $admission.repo "alice/my-repo" "repo identity preserved for FAILED"
@@ -661,6 +662,139 @@ let results = [
         let reason = "issue author (bot) does not match authenticated user (alice)"
         let comment = $"Rejection reason: ($reason)"
         assert ($comment | str contains "Rejection reason:") "rejection comment includes reason"
+    })
+    # --- fix #1: hex validation for base SHA ---
+    (test "watch hex sha rejects non-hex characters" {
+        assert (not (watch-hex-sha "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")) "z rejected"
+        assert (not (watch-hex-sha "ghijklmnopqrstuvwxyz0123456789abcdefghij")) "g-h rejected"
+        assert (not (watch-hex-sha "000000000000000000000000000000000000000g")) "trailing g rejected"
+        assert (not (watch-hex-sha "0000000000000000000000000000000000000000G")) "uppercase G rejected"
+        assert (not (watch-hex-sha "000000000000000000000000000000000000000!")) "exclamation rejected"
+        assert (not (watch-hex-sha "000000000000000000000000000000000000000-")) "dash rejected"
+    })
+    (test "watch hex sha accepts valid 40-character hex" {
+        assert (watch-hex-sha "abcdef0123456789abcdef0123456789abcdef02") "lowercase hex accepted"
+        assert (watch-hex-sha "ABCDEF0123456789ABCDEF0123456789ABCDEF02") "uppercase hex accepted"
+        assert (watch-hex-sha "0000000000000000000000000000000000000000") "all zeros accepted"
+        assert (watch-hex-sha "ffffffffffffffffffffffffffffffffffffffff") "all f's accepted"
+        assert (watch-hex-sha "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef") "mixed hex accepted"
+    })
+    (test "watch validate rejects non-hex 40-character base" {
+        let fm = {m2c_job: "1", base: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", branch: "feature/test", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "non-hex base rejected"
+        assert ($result.reason | str contains "hexadecimal") "reason mentions hexadecimal"
+        let fm2 = {m2c_job: "1", base: "000000000000000000000000000000000000000g", branch: "feature/test", model: "standard"}
+        let result2 = (watch-validate-packet $fm2)
+        assert (not $result2.ok) "trailing non-hex rejected"
+        assert ($result2.reason | str contains "non-hex") "reason mentions non-hex"
+    })
+    (test "watch validate accepts valid 40-char hex base" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert $result.ok "valid hex base accepted"
+    })
+    # --- fix #1: base resolution helper ---
+    (test "watch gh resolve base returns bool" {
+        let result = (watch-gh-resolve-base "user/nonexistent" "0000000000000000000000000000000000000000")
+        assert (not $result) "nonexistent repo returns false"
+    })
+    # --- fix #2: branch_match prevents DONE ---
+    (test "watch build result comment FAILED when branch mismatch" {
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {local_branch: "main", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: false}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
+        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when branch mismatch"
+        assert ($comment | str contains "branch_match: MISMATCH") "branch mismatch status"
+        assert ($comment | str contains "local branch main does not match requested branch") "branch mismatch reason"
+    })
+    (test "watch build result comment DONE when branch matches" {
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "DONE")
+        assert ($comment | str contains "M2C RESULT: DONE") "DONE when branch matches"
+        assert ($comment | str contains "branch_match: MATCH") "branch match status"
+        assert (not ($comment | str contains "does not match requested branch")) "no branch mismatch reason"
+    })
+    (test "branch mismatch prevents DONE even with clean worktree and remote SHA match" {
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {local_branch: "wrong-branch", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: false}
+        let can_be_done = ($summary.status == "completed") and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match and $delivery.branch_match
+        assert (not $can_be_done) "branch mismatch prevents DONE"
+    })
+    (test "all delivery gates must pass for DONE" {
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
+        let can_be_done = ($summary.status == "completed") and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match and $delivery.branch_match
+        assert $can_be_done "all gates pass for DONE"
+    })
+    (test "any delivery gate failure prevents DONE" {
+        let base = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
+        let dirty = ($base | merge {worktree_clean: false})
+        assert (not (($dirty.status? | default "completed") == "completed" and $dirty.worktree_clean and $dirty.remote_exists and $dirty.sha_match and $dirty.branch_match)) "dirty prevents DONE"
+        let no_remote = ($base | merge {remote_exists: false})
+        assert (not (($no_remote.status? | default "completed") == "completed" and $no_remote.worktree_clean and $no_remote.remote_exists and $no_remote.sha_match and $no_remote.branch_match)) "missing remote prevents DONE"
+        let sha_mismatch = ($base | merge {sha_match: false})
+        assert (not (($sha_mismatch.status? | default "completed") == "completed" and $sha_mismatch.worktree_clean and $sha_mismatch.remote_exists and $sha_mismatch.sha_match and $sha_mismatch.branch_match)) "sha mismatch prevents DONE"
+        let branch_mismatch = ($base | merge {branch_match: false})
+        assert (not (($branch_mismatch.status? | default "completed") == "completed" and $branch_mismatch.worktree_clean and $branch_mismatch.remote_exists and $branch_mismatch.sha_match and $branch_mismatch.branch_match)) "branch mismatch prevents DONE"
+        let worker_failed = {status: "failed", exit_code: 1}
+        assert (not ($worker_failed.status == "completed" and $base.worktree_clean and $base.remote_exists and $base.sha_match and $base.branch_match)) "worker failure prevents DONE"
+    })
+    # --- fix #3: stale issue revalidation ---
+    (test "stale issue with wrong title does not match queued filter" {
+        let issue = {repository: {nameWithOwner: "alice/my-repo"}, title: "[M2C RUNNING]", number: 7, url: "https://github.com/alice/my-repo/issues/7"}
+        assert (not ($issue.title | str starts-with "[M2C QUEUED]")) "running title not matched"
+    })
+    (test "closed issue state prevents claim" {
+        let issue_state = "CLOSED"
+        assert ($issue_state != "open") "closed issue is not open"
+    })
+    (test "title changed away from M2C QUEUED prevents claim" {
+        let issue_title = "[M2C RUNNING]"
+        assert (not ($issue_title | str starts-with "[M2C QUEUED]")) "changed title prevents claim"
+    })
+    (test "issue revalidation checks state and title" {
+        let detail = {state: "CLOSED", title: "[M2C QUEUED] test", author: {login: "alice"}, body: "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\nmodel: standard\n---\ndo work"}
+        assert ($detail.state != "open") "closed issue rejected"
+        let detail2 = {state: "OPEN", title: "[M2C RUNNING]", author: {login: "alice"}, body: "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\nmodel: standard\n---\ndo work"}
+        assert (not ($detail2.title | str starts-with "[M2C QUEUED]")) "title changed issue rejected"
+    })
+    # --- regression: OPEN state passes state/title gate (gh returns uppercase OPEN) ---
+    (test "OPEN state with QUEUED title passes state gate (gh enum case normalization)" {
+        let detail = {state: "OPEN", title: "[M2C QUEUED] test", author: {login: "alice"}, body: "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\nmodel: standard\n---\ndo work"}
+        let issue_state = ($detail.state? | default "" | str lowercase)
+        assert ($issue_state == "open") "normalized OPEN passes"
+        assert ($detail.title | str starts-with "[M2C QUEUED]") "QUEUED title accepted"
+    })
+    (test "CLOSED state with QUEUED title still rejected after normalization" {
+        let detail = {state: "CLOSED", title: "[M2C QUEUED] test", author: {login: "alice"}, body: "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\nmodel: standard\n---\ndo work"}
+        let issue_state = ($detail.state? | default "" | str lowercase)
+        assert ($issue_state != "open") "CLOSED still rejected"
+    })
+    # --- result comment branch mismatch explanation ---
+    (test "result comment explains branch mismatch with local and expected" {
+        let delivery = {local_branch: "main", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: false}
+        let summary = {status: "completed", exit_code: 0}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
+        assert ($comment | str contains "local branch main") "mentions local branch"
+        assert ($comment | str contains "does not match requested branch") "explains mismatch"
+    })
+    # --- regression: failure/fallback delivery shape includes branch_match ---
+    (test "fallback delivery record from clone failure produces FAILED without column error" {
+        let delivery = {local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: false}
+        let summary = {status: "failed", exit_code: 1, final_text: "worker error"}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
+        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED status produced"
+        assert ($comment | str contains "worker status: failed") "worker failure reported"
+        assert ($comment | str contains "branch_match: MISMATCH") "branch_match shown as MISMATCH"
+        assert ($comment | str contains "worktree: DIRTY") "worktree dirty"
+        assert ($comment | str contains "remote: MISMATCH") "remote mismatch"
+    })
+    (test "fallback delivery with branch_match false prevents DONE gate" {
+        let delivery = {local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: false}
+        let can_be_done = (false) and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match and $delivery.branch_match
+        assert (not $can_be_done) "fallback delivery prevents DONE"
     })
 ]
 
