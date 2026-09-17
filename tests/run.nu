@@ -136,6 +136,15 @@ let results = [
         assert-equal $summary.final_text "done" "final text"
         let failed = (worker-summary [] "mimo-v2.5" null null 1 1 false)
         assert-equal $failed.status "failed" "empty worker output fails closed"
+        let zero_output = (worker-summary [] "mimo-v2.5" null null 1 0 false)
+        assert-equal $zero_output.status "failed" "zero exit without completion evidence is not success"
+        let tool_error = [{type: "tool_use", part: {tool: "edit", state: {status: "error", input: {filePath: "src/a.nu"}}}}]
+        let failed_tool = (worker-summary $tool_error "mimo-v2.5" null null 1 0 false)
+        assert-equal $failed_tool.status "failed" "tool failure is not success"
+        let incomplete = [{type: "text", part: {text: "finished"}}]
+        assert-equal (worker-summary $incomplete "mimo-v2.5" null null 1 0 false).status "failed" "missing completion signal fails closed"
+        let malformed = (parse-worker-events "not-json\n{bad}\n{\"type\":\"tool_use\"")
+        assert-equal ($malformed | length) 0 "malformed and scalar worker lines are discarded"
     })
     (test "telemetry derives timing and tool aggregates without content" {
         let started = ((date now) - 5sec)
@@ -152,6 +161,15 @@ let results = [
         assert-equal $telemetry.verification_commands_count 1 "verification aggregate"
         assert (($telemetry.time_to_first_tool_seconds | into float) >= 1.0) "first tool timing"
         assert (not (($telemetry.records | to json) | str contains "secret.txt")) "telemetry has no file content"
+        let commands = ["grep -qxF AFTER fixture.txt" "cargo test" "cargo check" "nu tests/run.nu" "sha256sum -c SHA256SUMS"]
+        for command in $commands { assert (telemetry-verification-command {type: "tool_use", part: {tool: "bash", state: {input: {command: $command}}}}) $"verification command recognized: ($command)" }
+        assert (not (telemetry-verification-command {type: "tool_use", part: {tool: "bash", state: {input: {command: "printf ordinary output"}}}})) "ordinary shell command is not verification"
+        let ordered = (telemetry-derived [
+            {type: "tool_use", timestamp: ($start_ms + 3000), part: {tool: "bash", state: {status: "completed", input: {command: "cargo test"}}}}
+            {type: "tool_use", timestamp: ($start_ms + 2000), part: {tool: "edit", state: {status: "completed", input: {filePath: "a"}}}}
+        ] $started (date now)).records
+        assert-equal $ordered.1.event "tool_end" "chronological telemetry event order"
+        assert-equal $ordered.1.t 2.0 "chronological telemetry timestamp"
     })
     (test "context threshold policy" {
         assert-equal (checkpoint-state {context_percent: 29.9}) "normal" "normal"

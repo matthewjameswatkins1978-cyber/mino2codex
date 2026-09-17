@@ -269,7 +269,10 @@ def checkpoint-state [state: record] {
 }
 
 def parse-worker-events [raw: string] {
-    $raw | lines | each {|line| try { $line | from json } catch { null }} | where {|item| $item != null }
+    $raw | lines | each {|line|
+        let parsed = (try { $line | from json } catch { null })
+        if (($parsed | describe | str starts-with "record<")) { $parsed } else { null }
+    } | where {|item| $item != null }
 }
 
 def telemetry-tool [event: any] {
@@ -287,7 +290,10 @@ def telemetry-command [event: any] {
 
 def telemetry-event-seconds [event: any started_ms: int] {
     let timestamp = ($event.timestamp? | default null)
-    if ($timestamp == null) { null } else { ((($timestamp | into int) - $started_ms) / 1000.0) }
+    if ($timestamp == null) { null } else {
+        let seconds = ((($timestamp | into int) - $started_ms) / 1000.0)
+        if $seconds < 0 { null } else { $seconds }
+    }
 }
 
 def telemetry-tool-events [events: list<any>] {
@@ -299,8 +305,17 @@ def telemetry-counts [values: list<string>] {
 }
 
 def telemetry-verification-command [event: any] {
+    let tool = (telemetry-tool $event)
     let command = (telemetry-command $event | str lowercase)
-    ($command | str contains "test") or ($command | str contains "verify") or ($command | str contains "check") or ($command | str contains "pytest") or ($command | str contains "cargo") or ($command | str contains "dune") or ($command | str contains "grep -f")
+    let words = ($command | split row " " | where {|word| ($word | is-not-empty)})
+    let executable = ($words | first | default "")
+    let arguments = ($words | skip 1)
+    let validation_subcommands = ["test" "check" "verify" "lint" "typecheck" "build" "compile"]
+    let validation_runner = ($executable in ["cargo" "go" "npm" "pnpm" "yarn" "pytest" "dune" "dotnet" "mvn" "gradle" "make"] and ($arguments | any {|word| $word in $validation_subcommands}))
+    let nu_test_file = ($executable == "nu" and ($arguments | any {|word| ($word | str contains "test") or ($word | str contains "tests/") or ($word | str contains "tests\\") }))
+    let assertion_grep = ($executable in ["grep" "rg"] and ($arguments | any {|word| ($word | str contains "q") or ($word | str contains "x") }))
+    let checksum = ($executable in ["sha256sum" "shasum"] and ($arguments | any {|word| $word == "-c" or $word == "--check" }))
+    ($tool in ["bash" "shell" "terminal" "exec" "command" "run"] and ($validation_runner or $nu_test_file or $assertion_grep or $checksum))
 }
 
 def telemetry-derived [events: list<any> started: any ended: any] {
@@ -321,7 +336,7 @@ def telemetry-derived [events: list<any> started: any ended: any] {
         if (($time.start? | default null) != null) and (($time.end? | default null) != null) { (($time.end - $time.start) / 1000.0) } else { null }
     } | where {|value| $value != null})
     let silence = ($timestamps | window 2 | each {|pair| (($pair.1 - $pair.0) / 1000.0)} | default [] | sort | last | default null)
-    let records = (mut rec = [{t: 0.0, event: "worker_start"}]; if ($provider_event != null) { $rec = ($rec | append {t: (telemetry-event-seconds $provider_event $started_ms), event: "provider_first_event"}) }; for event in $tool_events { let tool = (telemetry-tool $event); let ok = (($event.part.state.status? | default "") not-in ["error", "failed"]); $rec = ($rec | append {t: (telemetry-event-seconds $event $started_ms), event: "tool_end", tool: $tool, ok: $ok}) }; if ($first_file_change != null) { $rec = ($rec | append {t: (telemetry-event-seconds $first_file_change $started_ms), event: "first_file_change"}) }; if ($first_verification != null) { $rec = ($rec | append {t: (telemetry-event-seconds $first_verification $started_ms), event: "first_verification"}) }; $rec | append {t: $duration, event: "worker_complete"})
+    let records = (mut rec = [{t: 0.0, event: "worker_start"}]; if ($provider_event != null) { $rec = ($rec | append {t: (telemetry-event-seconds $provider_event $started_ms), event: "provider_first_event"}) }; for event in $tool_events { let tool = (telemetry-tool $event); let ok = (($event.part.state.status? | default "") not-in ["error", "failed"]); $rec = ($rec | append {t: (telemetry-event-seconds $event $started_ms), event: "tool_end", tool: $tool, ok: $ok}) }; if ($first_file_change != null) { $rec = ($rec | append {t: (telemetry-event-seconds $first_file_change $started_ms), event: "first_file_change"}) }; if ($first_verification != null) { $rec = ($rec | append {t: (telemetry-event-seconds $first_verification $started_ms), event: "first_verification"}) }; ($rec | append {t: $duration, event: "worker_complete"} | sort-by {|record| if ($record.t == null) { 9223372036854775807 } else { $record.t } }))
     {
         records: $records
         time_to_first_provider_event_seconds: (if ($provider_event == null) { null } else { telemetry-event-seconds $provider_event $started_ms })
@@ -437,13 +452,13 @@ def worker-summary [events: list<any> model: string workstream: any packet: any 
     let context_pct = (context-percent $context_tokens)
     let text = ($events | where type == "text" | get part.text? | default [] | str join "")
     let tool_calls = ($events | where type in ["tool_use", "tool_call"] | length)
-    let tool_failures = ($events | where type == "tool_use" | each {|event| $event.part.state.status? | default "" } | where {|status| $status in ["error", "failed"]} | length)
+    let tool_failures = ($events | where type in ["tool_use", "tool_call"] | each {|event| $event.part.state.status? | default "" } | where {|status| $status in ["error", "failed"]} | length)
     let changed_files = ($events | where type == "tool_use" | where {|event| let tool = ($event.part.tool? | default ""); $tool in ["edit", "write", "patch"]} | each {|event|
         let input = ($event.part.state.input? | default {})
         [$input.filePath? $input.path? $input.file?] | where {|path| $path != null}
     } | flatten | where {|path| $path != null} | uniq)
     let base = {
-        status: (if $cancelled { "cancelled" } else if $timed_out { "timed_out" } else if $exit_code == 0 { "completed" } else { "failed" })
+        status: (if $cancelled { "cancelled" } else if $timed_out { "timed_out" } else if ($exit_code == 0) and (($finishes | length) > 0) and ($tool_failures == 0) { "completed" } else { "failed" })
         backend: "opencode"
         provider: (worker-provider-id)
         model: $model
@@ -465,6 +480,11 @@ def worker-summary [events: list<any> model: string workstream: any packet: any 
 }
 
 def worker-job-id [] { random uuid | str replace --all "-" "" }
+
+def watchdog-limit-ns [] {
+    let override = ($env.M2C_TEST_WATCHDOG_MS? | default "" | str trim)
+    if ($override | is-empty) { 1200000000000 } else { try { (($override | into int) * 1000000) } catch { 1200000000000 } }
+}
 
 def worker-command [model: string prompt: string session_id: any cwd: path agent: string = "build" fork: bool = false] {
     let base = ["run" "--pure" "--model" (worker-model $model) "--agent" $agent "--format" "json" "--dir" ($cwd | path expand)]
@@ -489,6 +509,8 @@ def worker-run [model: string prompt: string workstream: any packet: any session
     let command = (worker-command $model $prompt $session_id $cwd $agent $fork)
     let environment = {OPENCODE_CONFIG_CONTENT: (worker-config true | to json -r), MIMO_API_KEY: $credential.value}
     let started = (date now)
+    let watchdog_ns = (watchdog-limit-ns)
+    let watchdog_seconds = (($watchdog_ns / 1000000000) | math round | into int)
     let job = (job spawn --description $"m2c OpenCode worker ($model)" {
         with-env $environment {
             try {
@@ -512,7 +534,7 @@ def worker-run [model: string prompt: string workstream: any packet: any session
         let size = ($raw | str length)
         if $size != $last_size { $last_event_at = (date now); $last_size = $size }
         let events = (parse-worker-events $raw)
-        let state = (worker-console-state $events $model $started 1200 $last_event_at true)
+        let state = (worker-console-state $events $model $started $watchdog_seconds $last_event_at true)
         let new_events = ($events | skip $rendered_event_count)
         let elapsed_since_render = (((((date now) - $last_render_at) | into int) / 1000000000) | math round)
         let meaningful_event = ($new_events | any {|event| console-meaningful-event $event})
@@ -530,7 +552,7 @@ def worker-run [model: string prompt: string workstream: any packet: any session
             $finished = {exit_code: ($message.exit_code? | default 1), timed_out: false, cancelled: false}
             $done = true
         } else {
-            if (((date now) - $started) | into int) >= 1200000000000 {
+            if (((date now) - $started) | into int) >= $watchdog_ns {
                 try { job kill $job } catch { }
                 $finished = {exit_code: 124, timed_out: true, cancelled: false}
                 $done = true
@@ -556,7 +578,7 @@ def worker-run [model: string prompt: string workstream: any packet: any session
     let telemetry_summary = ($telemetry | reject records | insert telemetry_path $telemetry_path)
     let final_status = (if ($finished.cancelled? | default false) { "cancelled" } else if $finished.timed_out { "timed_out" } else if $finished.exit_code == 0 { "complete" } else { "failed" })
     if $console_on {
-        let final_state = (worker-console-state $events $model $started 1200 $last_event_at false $final_status)
+        let final_state = (worker-console-state $events $model $started $watchdog_seconds $last_event_at false $final_status)
         let frame = (console-frame $final_state (try { (term size).columns } catch { 80 }))
         $previous_lines = (render-console $frame $previous_lines)
         finish-console true $previous_lines
