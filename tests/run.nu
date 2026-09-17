@@ -233,6 +233,12 @@ let results = [
         assert (($frame | length) >= 5) "narrow frame"
         assert (($frame | str join "\n") | str contains "STARTING") "narrow state"
     })
+    (test "console refresh events are narrow and meaningful" {
+        assert (console-meaningful-event {type: "step_start"}) "starting refresh"
+        assert (console-meaningful-event {type: "tool_use", part: {tool: "edit", state: {status: "completed", input: {filePath: "a"}}}}) "file change refresh"
+        assert (console-meaningful-event {type: "tool_use", part: {tool: "bash", state: {status: "completed", input: {command: "cargo test"}}}}) "verification refresh"
+        assert (not (console-meaningful-event {type: "text", part: {text: "working"}})) "ordinary text waits for cadence"
+    })
 ]
 
 print ($results | table)

@@ -260,11 +260,11 @@ def parse-worker-events [raw: string] {
 }
 
 def telemetry-tool [event: any] {
-    ($event.part.tool? | default "unknown" | str lowercase)
+    ($event.part?.tool? | default "unknown" | str lowercase)
 }
 
 def telemetry-input [event: any] {
-    $event.part.state?.input? | default {}
+    $event.part?.state?.input? | default {}
 }
 
 def telemetry-command [event: any] {
@@ -407,6 +407,12 @@ def finish-console [enabled: bool previous_lines: int] {
     if $enabled { let esc = (char --integer 27); print --stderr $"($esc)[?25h"; if $previous_lines > 0 { print --stderr "" } }
 }
 
+def console-meaningful-event [event: any] {
+    let tool = (telemetry-tool $event)
+    let status = ($event.part?.state?.status? | default "")
+    ($event.type in ["tool_use", "tool_call"] and (($tool in ["edit", "write", "patch"]) or ($status in ["error", "failed"]) or (telemetry-verification-command $event))) or ($event.type == "step_start")
+}
+
 def worker-summary [events: list<any> model: string workstream: any packet: any duration: any exit_code: int timed_out: bool cancelled: bool = false telemetry: any = null] {
     let sessions = ($events | get sessionID? | default [] | where {|x| $x != null} | uniq)
     let finishes = ($events | where type == "step_finish")
@@ -486,17 +492,25 @@ def worker-run [model: string prompt: string workstream: any packet: any session
     mut last_size = -1
     mut finished: any = null
     mut done = false
+    mut last_render_at = $started
+    mut rendered_event_count = 0
     while not $done {
         let raw = (if ($raw_path | path exists) { open --raw $raw_path } else { "" })
         let size = ($raw | str length)
         if $size != $last_size { $last_event_at = (date now); $last_size = $size }
         let events = (parse-worker-events $raw)
         let state = (worker-console-state $events $model $started 1200 $last_event_at true)
-        if $console_on {
+        let new_events = ($events | skip $rendered_event_count)
+        let elapsed_since_render = (((((date now) - $last_render_at) | into int) / 1000000000) | math round)
+        let meaningful_event = ($new_events | any {|event| console-meaningful-event $event})
+        let refresh = ($previous_lines == 0) or $meaningful_event or ($elapsed_since_render >= 10)
+        if $console_on and $refresh {
             let frame = (console-frame $state (try { (term size).columns } catch { 80 }))
             let esc = (char --integer 27)
             if $previous_lines == 0 { print --stderr $"($esc)[?25l" }
             $previous_lines = (render-console $frame $previous_lines)
+            $last_render_at = (date now)
+            $rendered_event_count = ($events | length)
         }
         let message = (try { job recv --timeout 0sec } catch { null })
         if $message != null {
