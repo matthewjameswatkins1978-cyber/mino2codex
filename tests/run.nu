@@ -86,6 +86,21 @@ let results = [
         assert (($standard | str join " ") | str contains "--format json") "json format"
         assert (($standard | str join " ") | str contains "--dir") "cwd flag"
     })
+    (test "machine execution agent is explicit and packet intent is preserved" {
+        assert-equal (worker-agent "Edit src/a.nu and run its tests") "build" "normal execution uses build"
+        assert-equal (worker-agent "Plan only; do not edit files") "plan" "plan-only uses plan"
+        assert-equal (worker-agent "Review only, read-only, do not modify files") "explore" "review-only uses explore"
+        let normal = (worker-command "mimo-v2.5" "task" null $project_root)
+        let plan = (worker-command "mimo-v2.5" "task" null $project_root "plan")
+        let forked = (worker-command "mimo-v2.5" "task" "ses-old" $project_root "build" true)
+        assert (($normal | str join " ") | str contains "--agent build") "build agent flag"
+        assert (($plan | str join " ") | str contains "--agent plan") "plan agent flag"
+        assert (($forked | str join " ") | str contains "--session ses-old --fork") "mode change forks"
+        assert-equal (worker-config true).permission.question "deny" "headless worker cannot ask approval"
+        assert (worker-fork-required "ses-old" "plan" "build") "plan to build forks"
+        assert (not (worker-fork-required "ses-old" "build" "build")) "same agent continues"
+        assert (not (worker-fork-required null null "build")) "new session does not fork"
+    })
     (test "OpenCode JSON event parsing and summary" {
         let raw = '{"type":"text","sessionID":"ses-test","part":{"text":"done"}}
 {"type":"tool_use","sessionID":"ses-test","part":{"tool":"edit","state":{"status":"completed","input":{"filePath":"src/a.nu"}}}}
@@ -125,6 +140,57 @@ let results = [
         assert-equal (open --raw $path) $first "skill stable"
         remove-mimo-skill
         assert (not ($path | path exists)) "skill removed"
+    })
+    (test "activity reducer uses observable tool metadata" {
+        let read = {type: "tool_use", part: {tool: "read", state: {input: {filePath: "README.md"}}}}
+        let test = {type: "tool_use", part: {tool: "bash", state: {input: {command: "cargo test"}}}}
+        assert-equal (activity-from-event $read) "Inspecting project files" "read activity"
+        assert-equal (activity-from-event $test) "Running verification tests" "test activity"
+        assert-equal (activity-from-event {type: "unknown", part: {}}) "Working..." "unknown fallback"
+    })
+    (test "console state derives completion, failure, timeout and unknown context" {
+        let started = (date now)
+        let recent = (date now)
+        let complete = (worker-console-state [] "mimo-v2.5" $started 1200 $recent false "complete")
+        let failed = (worker-console-state [] "mimo-v2.5" $started 1200 $recent false "failed")
+        let timed = (worker-console-state [] "mimo-v2.5" $started 1200 $recent false "timed_out")
+        assert-equal $complete.worker_state "COMPLETE" "complete state"
+        assert-equal $failed.worker_state "FAILED" "failed state"
+        assert-equal $timed.worker_state "TIMED OUT" "timeout state"
+        assert-equal $complete.context_percent null "unknown context stays unknown"
+    })
+    (test "quiet detection is informational" {
+        let started = (date now)
+        let old = ((date now) - 61sec)
+        let state = (worker-console-state [] "mimo-v2.5-pro" $started 1200 $old true)
+        assert-equal $state.worker_state "QUIET" "quiet state"
+        assert ($state.process_alive) "process remains alive"
+    })
+    (test "watchdog and context calculations are truthful" {
+        let started = ((date now) - 65sec)
+        let event = {type: "step_finish", sessionID: "ses-test", part: {tokens: {input: 400000, cache: {read: 0}}}}
+        let state = (worker-console-state [$event] "mimo-v2.5" $started 1200 (date now) true)
+        assert ($state.elapsed >= 65) "elapsed time"
+        assert ($state.watchdog_remaining <= 1135) "watchdog remaining"
+        assert ($state.context_percent > 29.9) "context estimate"
+        assert ($state.checkpoint_recommended) "checkpoint threshold"
+    })
+    (test "platform guard is cross-platform and narrow" {
+        let linux_bad = (opencode-platform-status-for "unix" "/usr/bin/opencode.exe")
+        let linux_native = (opencode-platform-status-for "unix" "/home/user/bin/opencode")
+        let windows = (opencode-platform-status-for "windows" "C:\\Program Files\\opencode.exe")
+        assert-equal $linux_bad.status "invalid" "Linux rejects Windows executable"
+        assert-equal $linux_native.status "valid" "Linux accepts native executable"
+        assert-equal $windows.status "valid" "Windows accepts Windows executable"
+    })
+    (test "quiet parsing and narrow rendering" {
+        let parsed = (parse-run-args ["--quiet" "--json" "reply" "OK"])
+        assert $parsed.quiet "quiet flag"
+        assert $parsed.json "json flag"
+        let state = (worker-console-state [] "mimo-v2.5" (date now) 1200 (date now) true)
+        let frame = (console-frame $state 50)
+        assert (($frame | length) >= 5) "narrow frame"
+        assert (($frame | str join "\n") | str contains "STARTING") "narrow state"
     })
 ]
 

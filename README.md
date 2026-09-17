@@ -34,6 +34,7 @@ m2c run "bounded task"      machine worker, default Pro
 m2c standard run "task"    machine standard worker
 m2c pro run --json "task"  machine Pro worker with JSON envelope
 m2c run --workstream NAME --packet A1 --json "task"
+m2c standard run --quiet --json "task"
 m2c models
 m2c doctor [--live]
 m2c key status|replace|remove
@@ -43,6 +44,10 @@ m2c uninstall
 ```
 
 Every machine run explicitly selects `m2c-mimo/mimo-v2.5` or `m2c-mimo/mimo-v2.5-pro`, passes the current directory with `--dir`, and uses `--format json`. Normal output is a small stable envelope containing status, provider, model, session, packet, tool counts, context estimate, exit code, and final text. Raw OpenCode events remain local job evidence.
+
+Interactive machine runs also show a small live worker console on stderr. It refreshes on a three-second heartbeat from locally cached OpenCode events and process state: selected model, coarse activity, elapsed/watchdog time, tool counts, failures, context estimate, changed-file count, and quiet/final state. `--quiet` suppresses the console. stdout remains a clean JSON envelope for `m2c ... --json | jq .`; the console makes no provider or model calls and consumes no additional context tokens.
+
+Machine workers explicitly select OpenCode's `build` agent, so ordinary `run` packets are execution-capable and do not inherit the user's interactive plan mode. Packets that explicitly say plan-only use `plan`; explicit review/read-only packets use `explore`. If a workstream changes agent mode, m2c forks the prior session before continuing so useful context is retained without carrying an accidental mode across packets.
 
 ## Workstreams and context
 
