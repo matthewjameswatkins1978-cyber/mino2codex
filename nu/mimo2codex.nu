@@ -119,6 +119,19 @@ def model-records [] {
 
 def version-value [] { open (source-root | path join "VERSION") | str trim }
 def nu-version [] { run-external $nu.current-exe "--version" | str trim }
+def version-at [root: path] { try { open ($root | path join "VERSION") | str trim } catch { "unknown" } }
+def file-hash-at [root: path] { try { open --raw ($root | path join "mimo2codex.nu") | hash sha256 } catch { "unknown" } }
+def install-version-info [] {
+    let installed = (version-at (state-root))
+    let source = (version-at (source-root))
+    let installed_hash = (file-hash-at (state-root))
+    let source_hash = (file-hash-at (source-root))
+    let dev_source = (($env.MIMO2CODEX_SOURCE_ROOT? | default "") | path expand)
+    let installed_root = (state-root | path expand)
+    let source_root = (source-root | path expand)
+    let stale = (($dev_source | is-not-empty) and ($source_root != $installed_root) and (($installed != $source) or ($installed_hash != $source_hash)))
+    {installed: $installed, source: $source, source_root: $source_root, state_root: $installed_root, stale: $stale}
+}
 
 def opencode-path [] {
     let found = (which opencode | get path? | first | default "")
@@ -742,7 +755,10 @@ def print-help [] {
 
 def read-codex-version [] {
     let found = (which codex | get path? | first | default "")
-    if ($found | is-empty) { "missing" } else { try { run-external "codex" "--version" | str trim } catch { "unavailable" } }
+    if ($found | is-empty) { "missing" } else {
+        let result = (do { run-external "codex" "--version" } | complete)
+        if $result.exit_code == 0 { $result.stdout | str trim } else { "unavailable" }
+    }
 }
 
 def check-row [label: string status: string detail: string] { {check: $label, status: $status, detail: $detail} }
@@ -767,7 +783,9 @@ def doctor [args: list<string> = []] {
     let catalog_ok = (try { check-catalogue } catch { false })
     let credential = (credential-info)
     let codex_path = (which codex | get path? | first | default "")
-    let codex_ok = ($codex_path | is-not-empty)
+    let codex_version = (read-codex-version)
+    let codex_ok = (($codex_path | is-not-empty) and ($codex_version not-in ["missing", "unavailable"]))
+    let install_info = (install-version-info)
     let config = (state-root | path join "codex-home" | path join "config.toml")
     let catalogue_path = (catalogue-path)
     let opencode = (opencode-version)
@@ -779,7 +797,9 @@ def doctor [args: list<string> = []] {
     let rows = [
         (check-row "Platform" (if (["windows", "unix"] | any {|x| $x == $nu.os-info.family}) { "PASS" } else { "FAIL" }) $nu.os-info.name)
         (check-row "Nushell" "PASS" (nu-version))
-        (check-row "Codex" (if $codex_ok { "PASS" } else { "FAIL" }) (if $codex_ok { (read-codex-version) } else { "not found" }))
+        (check-row "Codex" (if $codex_ok { "PASS" } else if ($codex_path | is-not-empty) { "SKIP" } else { "FAIL" }) (if ($codex_path | is-empty) { "not found" } else if $codex_version == "unavailable" { "direct route unavailable" } else { $codex_version }))
+        (check-row "Installed m2c" (if $install_info.installed == "unknown" { "FAIL" } else if $install_info.stale { "STALE" } else { "PASS" }) $install_info.installed)
+        (check-row "m2c source" "PASS" $install_info.source)
         (check-row "OpenCode" (if ($opencode == "missing") { "FAIL" } else if $opencode_platform.status == "invalid" { "FAIL" } else { "PASS" }) (if $opencode_platform.status == "invalid" { $opencode_platform.detail } else { $opencode }))
         (check-row "MiMo config directory" (if (state-root | path exists) { "PASS" } else { "FAIL" }) (state-root))
         (check-row "Isolated CODEX_HOME" (if (state-root | path join "codex-home" | path exists) { "PASS" } else { "FAIL" }) (state-root | path join "codex-home"))
