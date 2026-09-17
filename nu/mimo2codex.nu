@@ -496,12 +496,12 @@ def result-envelope [summary: record agent: string] {
     $summary | insert agent $agent
 }
 
-def worker-run [model: string prompt: string workstream: any packet: any session_id: any quiet: bool = false agent: string = "build" fork: bool = false] {
+def worker-run [model: string prompt: string workstream: any packet: any session_id: any quiet: bool = false agent: string = "build" fork: bool = false cwd: any = null] {
     let opencode = (opencode-path)
     if ($opencode | is-empty) { error make {msg: "OpenCode is not installed. Run: npm install -g opencode-ai"} }
     let credential = (credential-info)
     if $credential.status != "configured" { error make {msg: "MiMo Token Plan credential is not configured. Run: m2c setup"} }
-    let cwd = (pwd | path expand)
+    let cwd = (if ($cwd != null) { $cwd | path expand } else { pwd | path expand })
     let job_id = (worker-job-id)
     let raw_path = (job-root | path join $"($job_id).jsonl")
     let stderr_path = (job-root | path join $"($job_id).stderr")
@@ -992,8 +992,7 @@ def watch-validate-packet [fm: record] {
 }
 
 def watch-gh-find-job [login: string] {
-    let query = $"repo:($login)/* is:issue is:open in:title \"[M2C QUEUED]\""
-    let result = (do { run-external "gh" "search" "issues" $query "--limit" "10" "--json" "repository,title,number,url" } | complete)
+    let result = (do { run-external "gh" "search" "issues" "--owner" $login "--state" "open" "--limit" "10" "--json" "repository,title,number,url" } | complete)
     if $result.exit_code != 0 { [] } else {
         let issues = (try { $result.stdout | from json } catch { [] })
         $issues | where {|issue| ($issue.title | str starts-with "[M2C QUEUED]")}
@@ -1006,13 +1005,14 @@ def watch-parse-model [value: string] {
 }
 
 def watch-admit-job [issue: record login: string] {
-    let body_result = (do { run-external "gh" "issue" "view" ($issue.number | into string) "--repo" $issue.repository.name "--json" "body,author" } | complete)
+    let repo_full = ($issue.repository.nameWithOwner? | default $issue.repository.name)
+    let body_result = (do { run-external "gh" "issue" "view" ($issue.number | into string) "--repo" $repo_full "--json" "body,author" } | complete)
     if $body_result.exit_code != 0 { {ok: false, reason: "failed to fetch issue body"} } else {
         let detail = (try { $body_result.stdout | from json } catch { null })
         if ($detail == null) { {ok: false, reason: "failed to parse issue data"} } else {
             let author = ($detail.author.login? | default "")
             if $author != $login { {ok: false, reason: $"issue author ($author) does not match authenticated user ($login)"} } else {
-                let owner = ($issue.repository.name | split row "/" | first)
+                let owner = ($repo_full | split row "/" | first)
                 if $owner != $login { {ok: false, reason: $"repository owner ($owner) does not match authenticated user ($login)"} } else {
                     let fm = (watch-gh-parse-front-matter $detail.body)
                     if ($fm == null) { {ok: false, reason: "missing or malformed front matter (must start with ---)"} } else {
@@ -1022,7 +1022,7 @@ def watch-admit-job [issue: record login: string] {
                             let fm_end = ($body_lines | enumerate | where {|item| $item.item == "---"} | skip 1 | first)
                             let packet = (if ($fm_end == null) { "" } else { $detail.body | lines | skip ($fm_end.index + 1) | str join "\n" | str trim })
                             if ($packet | is-empty) { {ok: false, reason: "no worker packet after front matter"} } else {
-                                {ok: true, base: $validation.base, branch: $validation.branch, model: $validation.model, packet: $packet, owner: $owner, repo: $issue.repository.name, number: $issue.number, title: $issue.title, url: $issue.url}
+                                {ok: true, base: $validation.base, branch: $validation.branch, model: $validation.model, packet: $packet, owner: $owner, repo: $repo_full, number: $issue.number, title: $issue.title, url: $issue.url}
                             }
                         }
                     }
@@ -1060,7 +1060,7 @@ def watch-run-worker-in-job [job_dir: path job: record] {
     let model_id = (if $job.model == "standard" { (provider-data).models.standard } else { (provider-data).models.pro })
     let prompt = $"($job.packet)\n\nReturn a concise completion report with files changed, tests run and results, unresolved issues, and any evidence needed for verification."
     let agent = (worker-agent $job.packet)
-    let run = (worker-run $model_id $prompt null null null true $agent false)
+    let run = (worker-run $model_id $prompt null null null true $agent false $clone_dir)
     {summary: $run.summary, clone_dir: $clone_dir}
 }
 
@@ -1091,8 +1091,8 @@ def watch-verify-delivery [clone_dir: path job: record] {
     }
 }
 
-def watch-build-result-comment [summary: record delivery: record model: string] {
-    let status = (if $summary.status == "completed" { "DONE" } else { "FAILED" })
+def watch-build-result-comment [summary: record delivery: record model: string final_status: string] {
+    let status = $final_status
     let exit_code = ($summary.exit_code? | default 1)
     let worktree_status = (if $delivery.worktree_clean { "CLEAN" } else { "DIRTY" })
     let remote_status = (if $delivery.sha_match { "MATCH" } else { "MISMATCH" })
@@ -1158,7 +1158,7 @@ def watch-command [args: list<string>] {
                         let final_status = (if $can_be_done { "DONE" } else { "FAILED" })
                         let final_title = $"[M2C ($final_status)]"
                         watch-update-title $job.repo $job.number $final_title
-                        let comment = (watch-build-result-comment $run_result.summary $delivery $admission.model)
+                        let comment = (watch-build-result-comment $run_result.summary $delivery $admission.model $final_status)
                         watch-add-comment $job.repo $job.number $comment
                         print $"Job ($final_status). Title: ($final_title)"
                         $running = false
@@ -1168,6 +1168,8 @@ def watch-command [args: list<string>] {
                     }
                 } else {
                     print $"Job rejected: ($admission.reason)"
+                    watch-update-title $job.repo $job.number "[M2C BLOCKED]"
+                    watch-add-comment $job.repo $job.number $"Rejection reason: ($admission.reason)"
                 }
             }
         }
