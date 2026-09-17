@@ -974,11 +974,15 @@ def watch-gh-parse-front-matter [body: string] {
     }
 }
 
+def watch-hex-sha [value: string] {
+    ($value | str replace --regex '[^0-9a-fA-F]' '' | str length) == ($value | str length)
+}
+
 def watch-validate-packet [fm: record] {
     let m2c_job = ($fm | get -o "m2c_job" | default "")
     if $m2c_job != "1" { {ok: false, reason: $"m2c_job must be 1, got ($m2c_job)"} } else {
         let base = ($fm | get -o "base" | default "")
-        if ($base | str length) != 40 { {ok: false, reason: $"base must be a 40-char SHA, got ($base | str length) chars"} } else {
+        if ($base | str length) != 40 { {ok: false, reason: $"base must be a 40-char SHA, got ($base | str length) chars"} } else if not (watch-hex-sha $base) { {ok: false, reason: $"base must be exactly 40 hexadecimal characters, contains non-hex: ($base)"} } else {
             let branch = ($fm | get -o "branch" | default "")
             if ($branch == "main") or ($branch == "master") { {ok: false, reason: $"target branch cannot be main or master, got ($branch)"} } else if ($branch | is-empty) { {ok: false, reason: "branch field is required"} } else {
                 let model_str = ($fm | get -o "model" | default "")
@@ -1008,25 +1012,38 @@ def watch-issue-repo [issue: record] {
     $issue.repository.nameWithOwner? | default $issue.repository.name
 }
 
+def watch-gh-resolve-base [repo: string sha: string] {
+    let result = (do { run-external "gh" "api" $"repos/($repo)/commits/($sha)" "--silent" } | complete)
+    $result.exit_code == 0
+}
+
 def watch-admit-job [issue: record login: string] {
     let repo_full = (watch-issue-repo $issue)
-    let body_result = (do { run-external "gh" "issue" "view" ($issue.number | into string) "--repo" $repo_full "--json" "body,author" } | complete)
+    let body_result = (do { run-external "gh" "issue" "view" ($issue.number | into string) "--repo" $repo_full "--json" "body,author,state,title" } | complete)
     if $body_result.exit_code != 0 { {ok: false, reason: "failed to fetch issue body"} } else {
         let detail = (try { $body_result.stdout | from json } catch { null })
         if ($detail == null) { {ok: false, reason: "failed to parse issue data"} } else {
-            let author = ($detail.author.login? | default "")
-            if $author != $login { {ok: false, reason: $"issue author ($author) does not match authenticated user ($login)"} } else {
-                let owner = ($repo_full | split row "/" | first)
-                if $owner != $login { {ok: false, reason: $"repository owner ($owner) does not match authenticated user ($login)"} } else {
-                    let fm = (watch-gh-parse-front-matter $detail.body)
-                    if ($fm == null) { {ok: false, reason: "missing or malformed front matter (must start with ---)"} } else {
-                        let validation = (watch-validate-packet $fm)
-                        if (not $validation.ok) { $validation } else {
-                            let body_lines = ($detail.body | lines)
-                            let fm_end = ($body_lines | enumerate | where {|item| $item.item == "---"} | skip 1 | first)
-                            let packet = (if ($fm_end == null) { "" } else { $detail.body | lines | skip ($fm_end.index + 1) | str join "\n" | str trim })
-                            if ($packet | is-empty) { {ok: false, reason: "no worker packet after front matter"} } else {
-                                {ok: true, base: $validation.base, branch: $validation.branch, model: $validation.model, packet: $packet, owner: $owner, repo: $repo_full, number: $issue.number, title: $issue.title, url: $issue.url}
+            let issue_state = ($detail.state? | default "")
+            if $issue_state != "open" { {ok: false, reason: $"issue is not open (state: ($issue_state))"} } else {
+                let issue_title = ($detail.title? | default "")
+                if not ($issue_title | str starts-with "[M2C QUEUED]") { {ok: false, reason: $"issue title is no longer [M2C QUEUED] (title: ($issue_title))"} } else {
+                    let author = ($detail.author.login? | default "")
+                    if $author != $login { {ok: false, reason: $"issue author ($author) does not match authenticated user ($login)"} } else {
+                        let owner = ($repo_full | split row "/" | first)
+                        if $owner != $login { {ok: false, reason: $"repository owner ($owner) does not match authenticated user ($login)"} } else {
+                            let fm = (watch-gh-parse-front-matter $detail.body)
+                            if ($fm == null) { {ok: false, reason: "missing or malformed front matter (must start with ---)"} } else {
+                                let validation = (watch-validate-packet $fm)
+                                if (not $validation.ok) { $validation } else {
+                                    if not (watch-gh-resolve-base $repo_full $validation.base) { {ok: false, reason: $"base SHA ($validation.base) does not resolve in ($repo_full)"} } else {
+                                        let body_lines = ($detail.body | lines)
+                                        let fm_end = ($body_lines | enumerate | where {|item| $item.item == "---"} | skip 1 | first)
+                                        let packet = (if ($fm_end == null) { "" } else { $detail.body | lines | skip ($fm_end.index + 1) | str join "\n" | str trim })
+                                        if ($packet | is-empty) { {ok: false, reason: "no worker packet after front matter"} } else {
+                                            {ok: true, base: $validation.base, branch: $validation.branch, model: $validation.model, packet: $packet, owner: $owner, repo: $repo_full, number: $issue.number, title: $issue.title, url: $issue.url}
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1085,6 +1102,7 @@ def watch-verify-delivery [clone_dir: path job: record] {
         }
     } catch { "" })
     let sha_match = ($remote_sha != "") and ($local_sha == $remote_sha)
+    let branch_match = ($local_branch == $job.branch)
     {
         local_branch: $local_branch
         local_sha: $local_sha
@@ -1092,6 +1110,7 @@ def watch-verify-delivery [clone_dir: path job: record] {
         remote_exists: $remote_exists
         remote_sha: $remote_sha
         sha_match: $sha_match
+        branch_match: $branch_match
     }
 }
 
@@ -1100,7 +1119,9 @@ def watch-build-result-comment [summary: record delivery: record model: string f
     let exit_code = ($summary.exit_code? | default 1)
     let worktree_status = (if $delivery.worktree_clean { "CLEAN" } else { "DIRTY" })
     let remote_status = (if $delivery.sha_match { "MATCH" } else { "MISMATCH" })
+    let branch_status = (if $delivery.branch_match { "MATCH" } else { "MISMATCH" })
     let reasons = [
+        (if not $delivery.branch_match { $"local branch ($delivery.local_branch) does not match requested branch" } else { "" })
         (if (not $delivery.worktree_clean) { "worktree is dirty" } else { "" })
         (if (not $delivery.remote_exists) { $"remote branch ($delivery.local_branch) does not exist" } else { "" })
         (if (not $delivery.sha_match) and $delivery.remote_exists { $"remote SHA ($delivery.remote_sha) != local SHA ($delivery.local_sha)" } else { "" })
@@ -1111,6 +1132,7 @@ def watch-build-result-comment [summary: record delivery: record model: string f
         $"M2C RESULT: ($status)"
         $"model: ($model)"
         $"branch: ($delivery.local_branch)"
+        $"branch_match: ($branch_status)"
         $"sha: ($delivery.local_sha)"
         $"exit: ($exit_code)"
         $"worktree: ($worktree_status)"
@@ -1158,7 +1180,7 @@ def watch-command [args: list<string>] {
                         } else {
                             {local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false}
                         })
-                        let can_be_done = ($run_result.summary.status == "completed") and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match
+                        let can_be_done = ($run_result.summary.status == "completed") and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match and $delivery.branch_match
                         let final_status = (if $can_be_done { "DONE" } else { "FAILED" })
                         let final_title = $"[M2C ($final_status)]"
                         watch-update-title $admission.repo $admission.number $final_title
