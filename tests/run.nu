@@ -86,6 +86,21 @@ let results = [
         assert (($standard | str join " ") | str contains "--format json") "json format"
         assert (($standard | str join " ") | str contains "--dir") "cwd flag"
     })
+    (test "machine execution agent is explicit and packet intent is preserved" {
+        assert-equal (worker-agent "Edit src/a.nu and run its tests") "build" "normal execution uses build"
+        assert-equal (worker-agent "Plan only; do not edit files") "plan" "plan-only uses plan"
+        assert-equal (worker-agent "Review only, read-only, do not modify files") "explore" "review-only uses explore"
+        let normal = (worker-command "mimo-v2.5" "task" null $project_root)
+        let plan = (worker-command "mimo-v2.5" "task" null $project_root "plan")
+        let forked = (worker-command "mimo-v2.5" "task" "ses-old" $project_root "build" true)
+        assert (($normal | str join " ") | str contains "--agent build") "build agent flag"
+        assert (($plan | str join " ") | str contains "--agent plan") "plan agent flag"
+        assert (($forked | str join " ") | str contains "--session ses-old --fork") "mode change forks"
+        assert-equal (worker-config true).permission.question "deny" "headless worker cannot ask approval"
+        assert (worker-fork-required "ses-old" "plan" "build") "plan to build forks"
+        assert (not (worker-fork-required "ses-old" "build" "build")) "same agent continues"
+        assert (not (worker-fork-required null null "build")) "new session does not fork"
+    })
     (test "OpenCode JSON event parsing and summary" {
         let raw = '{"type":"text","sessionID":"ses-test","part":{"text":"done"}}
 {"type":"tool_use","sessionID":"ses-test","part":{"tool":"edit","state":{"status":"completed","input":{"filePath":"src/a.nu"}}}}

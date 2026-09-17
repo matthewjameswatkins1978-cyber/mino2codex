@@ -140,6 +140,13 @@ def opencode-version [] {
 
 def worker-provider-id [] { "m2c-mimo" }
 def worker-model [model: string] { $"(worker-provider-id)/($model)" }
+def worker-agent [task: string] {
+    let text = ($task | str lowercase)
+    if (($text | str contains "plan only") or ($text | str contains "planning only")) { "plan" } else if (($text | str contains "review only") or ($text | str contains "read only") or ($text | str contains "read-only") or ($text | str contains "without modifying") or ($text | str contains "do not modify") or ($text | str contains "don't modify")) { "explore" } else { "build" }
+}
+def worker-fork-required [session_id: any previous_agent: any agent: string] {
+    ($session_id != null) and ($previous_agent != $agent)
+}
 def worker-config [machine: bool = true] {
     let provider = (provider-data).provider
     {
@@ -363,13 +370,13 @@ def worker-summary [events: list<any> model: string workstream: any packet: any 
 
 def worker-job-id [] { random uuid | str replace --all "-" "" }
 
-def worker-command [model: string prompt: string session_id: any cwd: path] {
-    let base = ["run" "--pure" "--model" (worker-model $model) "--format" "json" "--dir" ($cwd | path expand)]
-    let continued = (if ($session_id == null) { $base } else { $base | append ["--session" $session_id] })
+def worker-command [model: string prompt: string session_id: any cwd: path agent: string = "build" fork: bool = false] {
+    let base = ["run" "--pure" "--model" (worker-model $model) "--agent" $agent "--format" "json" "--dir" ($cwd | path expand)]
+    let continued = (if ($session_id == null) { $base } else if $fork { $base | append ["--session" $session_id "--fork"] } else { $base | append ["--session" $session_id] })
     $continued | append $prompt
 }
 
-def worker-run [model: string prompt: string workstream: any packet: any session_id: any quiet: bool = false] {
+def worker-run [model: string prompt: string workstream: any packet: any session_id: any quiet: bool = false agent: string = "build" fork: bool = false] {
     let opencode = (opencode-path)
     if ($opencode | is-empty) { error make {msg: "OpenCode is not installed. Run: npm install -g opencode-ai"} }
     let credential = (credential-info)
@@ -379,7 +386,7 @@ def worker-run [model: string prompt: string workstream: any packet: any session
     let raw_path = (job-root | path join $"($job_id).jsonl")
     let stderr_path = (job-root | path join $"($job_id).stderr")
     mkdir (job-root)
-    let command = (worker-command $model $prompt $session_id $cwd)
+    let command = (worker-command $model $prompt $session_id $cwd $agent $fork)
     let environment = {OPENCODE_CONFIG_CONTENT: (worker-config true | to json -r), MIMO_API_KEY: $credential.value}
     let started = (date now)
     let job = (job spawn --description $"m2c OpenCode worker ($model)" {
@@ -433,7 +440,7 @@ def worker-run [model: string prompt: string workstream: any packet: any session
         $previous_lines = (render-console $frame $previous_lines)
         finish-console true $previous_lines
     }
-    let result = (worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out)
+    let result = ((worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out) | insert agent $agent)
     {summary: $result, raw_path: $raw_path, stderr_path: $stderr_path}
 }
 
@@ -487,7 +494,11 @@ def run-worker-command [model: string args: list<string>] {
         if $policy == "mandatory" { error make {msg: "Workstream requires a checkpoint before another substantive packet"} }
     }
     let prompt = $"($parsed.task)(worker-context-prefix $state)\n\nReturn a concise completion report with files changed, tests run and results, unresolved issues, and any evidence needed for verification."
-    let run = (worker-run $model $prompt $parsed.workstream $parsed.packet ($state.session_id? | default null) $parsed.quiet)
+    let agent = (worker-agent $parsed.task)
+    let previous_agent = (if $state == null { null } else { $state.agent? | default null })
+    let session_id = (if $state == null { null } else { $state.session_id? | default null })
+    let fork = (worker-fork-required $session_id $previous_agent $agent)
+    let run = (worker-run $model $prompt $parsed.workstream $parsed.packet $session_id $parsed.quiet $agent $fork)
     let summary = $run.summary
     if ($parsed.workstream != null) {
         let old_generation = ($state.checkpoint_generation? | default 0)
@@ -495,6 +506,7 @@ def run-worker-command [model: string args: list<string>] {
             name: $parsed.workstream
             cwd: (pwd | path expand)
             model: $model
+            agent: $agent
             session_id: $summary.session_id
             created_at: ($state.created_at? | default (iso-now))
             updated_at: (iso-now)
@@ -524,13 +536,15 @@ def checkpoint-command [args: list<string>] {
     if ($state.cwd != (pwd | path expand)) { error make {msg: "Workstream cwd mismatch; checkpoint from its recorded cwd"} }
     if (($state.session_id? | default null) == null) { error make {msg: "Workstream has no active session; run a new packet before checkpointing"} }
     let prompt = "Produce a short JSON workstream checkpoint with exactly these keys: workstream, objective, completed_packets, current_state, decisions, invariants, relevant_files, failed_approaches, verification, unresolved, next. Preserve working knowledge only; do not include a transcript or executable instructions."
-    let run = (worker-run $state.model $prompt $name "checkpoint" $state.session_id)
+    let checkpoint_fork = (worker-fork-required $state.session_id ($state.agent? | default null) "build")
+    let run = (worker-run $state.model $prompt $name "checkpoint" $state.session_id false "build" $checkpoint_fork)
     if $run.summary.status != "completed" { error make {msg: "Checkpoint worker did not complete"} }
     let generation = (($state.checkpoint_generation? | default 0) + 1)
     let updated = {
         name: $state.name
         cwd: $state.cwd
         model: $state.model
+        agent: "build"
         session_id: null
         created_at: $state.created_at
         updated_at: (iso-now)
