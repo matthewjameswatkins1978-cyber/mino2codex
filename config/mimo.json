@@ -1,0 +1,17 @@
+{
+  "provider": {
+    "id": "mimo",
+    "name": "mimo",
+    "endpoint": "https://token-plan-ams.xiaomimimo.com/v1",
+    "protocol": "responses",
+    "env_key": "MIMO_API_KEY",
+    "requires_openai_auth": false,
+    "context_window": 1048576,
+    "web_search": "disabled"
+  },
+  "models": {
+    "standard": "mimo-v2.5",
+    "pro": "mimo-v2.5-pro"
+  },
+  "default": "pro"
+}

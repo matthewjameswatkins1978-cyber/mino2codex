@@ -1,0 +1,6 @@
+.mimo2codex-test/
+.mimo2codex-state/
+credential
+*.secret
+.DS_Store
+Thumbs.db
