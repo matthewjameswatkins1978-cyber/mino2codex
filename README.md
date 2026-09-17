@@ -1,8 +1,10 @@
 # mimo2codex
 
-`mimo2codex` lets you run Xiaomi MiMo V2.5 models through the OpenAI Codex CLI without replacing or modifying your normal Codex setup. It is a small Nushell launcher, not an AI proxy or a generic provider framework.
+`mimo2codex` gives Codex and local development workflows a simple way to delegate bounded work to Xiaomi MiMo without requiring a second agent station. `m2c` is the public interface; OpenCode is the current replaceable worker backend underneath it.
 
-Requirements: OpenAI Codex CLI, Nushell 0.115 or newer, and a Xiaomi MiMo Token Plan. Windows 11, Linux, and WSL2/Ubuntu are supported.
+The worker uses Xiaomi's documented OpenCode/OpenAI-compatible integration at the Europe Token Plan endpoint. It does not use MiMo's unreliable Responses tool path for worker execution, and it never executes textual pseudo-tool calls.
+
+Requirements: Nushell 0.115+, OpenAI Codex CLI for the experimental direct route, OpenCode 1.18+ for worker execution, and a Xiaomi MiMo Token Plan. Windows, Linux, and WSL are supported.
 
 ## Quick start
 
@@ -12,53 +14,68 @@ cd mino2codex
 nu install.nu
 ```
 
-Open a new Nushell session, then:
+Open a new Nushell session, then configure the local credential:
 
 ```text
 m2c setup
-m2c
-m2c standard
-m2c pro
-m2c models
 m2c doctor
+m2c
 ```
 
-The default is `mimo-v2.5-pro`. Arguments that are not part of this small command namespace are passed to Codex, for example `m2c standard --help`.
+If OpenCode is missing, `m2c setup` reports the detected state and the Nu-native installation command to use: `npm install -g opencode-ai`.
 
-## Isolation and security
+## Public commands
 
-The launcher sets a dedicated `CODEX_HOME` for MiMo runs. It never changes the ordinary Codex home, profiles, login state, or configuration. The current working directory, terminal streams, and Codex exit status are preserved.
+```text
+m2c                         interactive Pro worker
+m2c standard                interactive standard worker
+m2c pro                    interactive Pro worker
+m2c run "bounded task"      machine worker, default Pro
+m2c standard run "task"    machine standard worker
+m2c pro run --json "task"  machine Pro worker with JSON envelope
+m2c run --workstream NAME --packet A1 --json "task"
+m2c models
+m2c doctor [--live]
+m2c key status|replace|remove
+m2c checkpoint --workstream NAME
+m2c version
+m2c uninstall
+```
 
-Nushell stores application state under its platform-aware data directory, in a `mimo2codex` subdirectory. The generated MiMo `config.toml` and model catalogue live there. The Token Plan key is stored separately in a local private credential file; it is injected only into the launched Codex child process and is never written to JSON, TOML, the repository, diagnostics, or logs. Use `m2c key status`, `m2c key replace`, and `m2c key remove` to manage it. Removing the stored key cannot remove an already-exported `MIMO_API_KEY` from the parent shell.
+Every machine run explicitly selects `m2c-mimo/mimo-v2.5` or `m2c-mimo/mimo-v2.5-pro`, passes the current directory with `--dir`, and uses `--format json`. Normal output is a small stable envelope containing status, provider, model, session, packet, tool counts, context estimate, exit code, and final text. Raw OpenCode events remain local job evidence.
 
-No key is needed in CI. Live checks are opt-in with `m2c doctor --live`.
+## Workstreams and context
 
-## Windows and WSL
+Use a workstream for related bounded packets. State is kept outside the repository and records only orchestration metadata: cwd, model, OpenCode session ID, packet, timestamps, context estimate, and checkpoint generation. A cwd or model mismatch fails; m2c never silently switches models or reuses a missing session.
 
-Nushell's `$nu.data-dir`, autoload paths, and `path join` provide the platform-specific paths. Installation places an autoloaded `m2c` command in Nushell's user autoload directory. WSL has its own Nushell data directory and credential, so run `nu install.nu` and `m2c setup` inside WSL if you want a WSL installation. The repository and working directory are not moved or copied into `CODEX_HOME`.
+Packets should target 10–15 minutes and must not be deliberately larger than 20 minutes. The worker watchdog is implemented with Nushell jobs and kills the worker job at the 20-minute ceiling, returning `status: "timed_out"`. A 30% context estimate recommends checkpointing, 35% is a watch zone, 45% requires `m2c checkpoint`, and 50% rejects another substantive packet. Checkpointing preserves a short knowledge summary and starts the next packet with a fresh OpenCode session.
 
-## Provider details
+The current usage estimate is `tokens.input + tokens.cache.read`, based on OpenCode's step-finish events. It is an estimate, not a claim of exact provider context accounting; see `docs/CONTEXT_ACCOUNTING.md`.
 
-The owned configuration uses Xiaomi's OpenAI Responses-compatible Token Plan endpoint, `https://token-plan-ams.xiaomimimo.com/v1`, and `MIMO_API_KEY`. The current Xiaomi guide also documents a China Token Plan endpoint; this project deliberately uses the Europe endpoint supplied for this installation. Both required models use the official catalogue fields, have reasoning enabled, and have web search disabled because compatibility with MiMo's Responses route is not established.
+## Configuration and security
 
-The Token Plan is intended for supported AI programming/development tools. This project launches OpenAI Codex directly; it does not expose an HTTP service, proxy, daemon, or unattended general-purpose API.
+Each worker run injects an m2c-owned `OPENCODE_CONFIG_CONTENT` at runtime. It contains only the unique `m2c-mimo` provider, both supported models, the AMS endpoint, the provider allowlist, and bounded worker permissions. The API key remains in the existing local credential file and is referenced through `{env:MIMO_API_KEY}`; it is never serialized into runtime JSON, TOML, logs, or the repository.
 
-## Uninstall
+The m2c skill is installed only in `CODEX_HOME/skills/mimo-worker/SKILL.md` (or the normal `~/.codex/skills` location when `CODEX_HOME` is unset). It does not modify global `AGENTS.md` or unrelated skills. `m2c uninstall` removes only that skill directory and m2c-owned state.
 
-Run `m2c uninstall` and type `REMOVE`, or run `nu uninstall.nu` from the checkout. This removes the installed Nushell command, isolated MiMo `CODEX_HOME`, local state, and stored credential. It does not delete repositories or normal Codex configuration. If the command was installed from a checkout that has since moved, remove the `m2c.nu` file from Nushell's user autoload directory and the `mimo2codex` directory from Nushell's data directory.
+OpenCode is not an OS sandbox. Its worker policy allows normal project work, denies questions and nested subagents in machine mode, denies web access and external-directory access, and fails closed when the worker cannot complete. No provider fallback is configured.
 
-## Troubleshooting
+## Direct Codex route
 
-Run `m2c doctor`. It is offline by default. Use `m2c doctor --live` only when you explicitly want a provider request. If the credential is missing or invalid, run `m2c setup` or `m2c key replace`; the launcher never falls back to OpenAI. If `m2c` is not found immediately after installation, open a new Nushell session so the user autoload directory is read.
+The original direct MiMo Responses integration remains available explicitly:
 
-The upstream repository currently has the historical name `mino2codex`; the product and code use `mimo2codex`. The project is unofficial and is not affiliated with Xiaomi or OpenAI.
+```text
+m2c codex
+m2c codex standard
+m2c codex pro
+```
+
+It is labelled **EXPERIMENTAL / KNOWN UPSTREAM TOOL-USE ISSUE**. Plain inference works, but the captured MiMo Responses path can emit textual `<tool_call>` markup instead of a structured function call, so m2c never parses or executes that text.
 
 ## Development
-
-General tests are Nushell-native and do not require a live key:
 
 ```text
 nu tests/run.nu
 ```
 
-The GitHub Actions matrix runs the same non-live tests on Ubuntu and Windows. Version `0.1.0` is the initial target, but it must not be called a release until both real Windows and WSL smoke tests verify both models and normal Codex remains unaffected.
+The test suite is offline and uses fake credentials. Live worker checks are explicit with `m2c doctor --live`; they use the real locally stored credential without printing it. The project is unofficial and is not affiliated with Xiaomi or OpenAI. The upstream repository retains its historical name `mino2codex`; the product and code use `mimo2codex`.
