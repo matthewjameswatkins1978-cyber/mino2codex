@@ -1,4 +1,5 @@
-let test_root = ($nu.temp-dir | path join $"mimo2codex-test-($nu.pid)")
+let test_tmp = ($env.MIMO2CODEX_TEST_TMP? | default $nu.temp-dir)
+let test_root = ($test_tmp | path join $"mimo2codex-test-($nu.pid)")
 let project_root = (pwd)
 $env.MIMO2CODEX_SOURCE_ROOT = $project_root
 $env.MIMO2CODEX_STATE_ROOT = $test_root
@@ -154,10 +155,19 @@ let results = [
         let complete = (worker-console-state [] "mimo-v2.5" $started 1200 $recent false "complete")
         let failed = (worker-console-state [] "mimo-v2.5" $started 1200 $recent false "failed")
         let timed = (worker-console-state [] "mimo-v2.5" $started 1200 $recent false "timed_out")
+        let cancelled = (worker-console-state [] "mimo-v2.5" $started 1200 $recent false "cancelled")
         assert-equal $complete.worker_state "COMPLETE" "complete state"
         assert-equal $failed.worker_state "FAILED" "failed state"
         assert-equal $timed.worker_state "TIMED OUT" "timeout state"
+        assert-equal $cancelled.worker_state "CANCELLED" "cancelled state"
         assert-equal $complete.context_percent null "unknown context stays unknown"
+    })
+    (test "cancelled summaries are distinct from watchdog timeouts" {
+        let cancelled = (worker-summary [] "mimo-v2.5" null null 2 130 false true)
+        let timed = (worker-summary [] "mimo-v2.5" null null 2 124 true false)
+        assert-equal $cancelled.status "cancelled" "cancelled result"
+        assert-equal $timed.status "timed_out" "watchdog result"
+        assert-equal $cancelled.exit_code 130 "cancel exit code"
     })
     (test "quiet detection is informational" {
         let started = (date now)
@@ -179,9 +189,13 @@ let results = [
         let linux_bad = (opencode-platform-status-for "unix" "/usr/bin/opencode.exe")
         let linux_native = (opencode-platform-status-for "unix" "/home/user/bin/opencode")
         let windows = (opencode-platform-status-for "windows" "C:\\Program Files\\opencode.exe")
+        let wrapper = ($test_root | path join "opencode-wrapper")
+        "#!/bin/sh\nexec /mnt/c/Users/Matmus/AppData/Roaming/npm/node_modules/opencode-ai/bin/opencode.exe \"$@\"\n" | save --force $wrapper
+        let linux_wrapper = (opencode-platform-status-for "unix" $wrapper)
         assert-equal $linux_bad.status "invalid" "Linux rejects Windows executable"
         assert-equal $linux_native.status "valid" "Linux accepts native executable"
         assert-equal $windows.status "valid" "Windows accepts Windows executable"
+        assert-equal $linux_wrapper.status "invalid" "Linux rejects Windows shell wrapper"
     })
     (test "quiet parsing and narrow rendering" {
         let parsed = (parse-run-args ["--quiet" "--json" "reply" "OK"])

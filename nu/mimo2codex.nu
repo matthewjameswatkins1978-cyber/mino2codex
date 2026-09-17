@@ -128,8 +128,15 @@ def opencode-path [] {
     } else { $found }
 }
 def opencode-platform-status-for [family: string path: string] {
-    if ($path | is-empty) { {status: "missing", detail: "not found"} } else if ($family == "unix") and (($path | str lowercase | str ends-with ".exe") or ($path | str lowercase | str ends-with ".cmd") or ($path | str lowercase | str ends-with ".bat") or ($path | str lowercase | str ends-with ".ps1")) {
-        {status: "invalid", detail: "Windows executable resolved under Linux/WSL; install native Linux OpenCode or fix PATH"}
+    if ($path | is-empty) { {status: "missing", detail: "not found"} } else if ($family == "unix") {
+        let lower_path = ($path | str lowercase)
+        let extension_match = (($lower_path | str ends-with ".exe") or ($lower_path | str ends-with ".cmd") or ($lower_path | str ends-with ".bat") or ($lower_path | str ends-with ".ps1"))
+        let file_detail = (try { (run-external "file" $path) | str lowercase } catch { "" })
+        let wrapper_text = (try { open --raw $path | str substring 0..4000 | str lowercase } catch { "" })
+        let windows_target = (($file_detail | str contains "pe32") or ($wrapper_text | str contains "opencode.exe") or ($wrapper_text | str contains "cmd.exe") or ($wrapper_text | str contains "powershell"))
+        if $extension_match or $windows_target {
+            {status: "invalid", detail: "Windows executable or wrapper resolved under Linux/WSL; install native Linux OpenCode or fix PATH"}
+        } else { {status: "valid", detail: $path} }
     } else { {status: "valid", detail: $path} }
 }
 def opencode-platform-status [path: string] { opencode-platform-status-for $nu.os-info.family $path }
@@ -273,7 +280,7 @@ def worker-console-state [events: list<any> model: string started_at: any watchd
     let summary = (worker-summary $events $model null null $elapsed (if $status == "complete" { 0 } else { 1 }) ($status == "timed_out"))
     let quiet = ($process_alive and $event_age >= 60)
     let waiting = ($process_alive and $event_age >= 30)
-    let worker_state = (if $status == "complete" { "COMPLETE" } else if $status == "failed" { "FAILED" } else if $status == "timed_out" { "TIMED OUT" } else if $quiet { "QUIET" } else if $waiting { "WAITING" } else if ($events | is-empty) { "STARTING" } else { "WORKING" })
+    let worker_state = (if $status == "complete" { "COMPLETE" } else if $status == "cancelled" { "CANCELLED" } else if $status == "failed" { "FAILED" } else if $status == "timed_out" { "TIMED OUT" } else if $quiet { "QUIET" } else if $waiting { "WAITING" } else if ($events | is-empty) { "STARTING" } else { "WORKING" })
     let activity = (if $quiet { "No worker event; process still alive" } else if $waiting { "Waiting for provider..." } else { (($events | each {|event| activity-from-event $event}) | last | default "Working...") })
     {
         model: $model
@@ -331,7 +338,7 @@ def finish-console [enabled: bool previous_lines: int] {
     if $enabled { let esc = (char --integer 27); print --stderr $"($esc)[?25h"; if $previous_lines > 0 { print --stderr "" } }
 }
 
-def worker-summary [events: list<any> model: string workstream: any packet: any duration: any exit_code: int timed_out: bool] {
+def worker-summary [events: list<any> model: string workstream: any packet: any duration: any exit_code: int timed_out: bool cancelled: bool = false] {
     let sessions = ($events | get sessionID? | default [] | where {|x| $x != null} | uniq)
     let finishes = ($events | where type == "step_finish")
     let last_finish = ($finishes | last)
@@ -348,7 +355,7 @@ def worker-summary [events: list<any> model: string workstream: any packet: any 
         [$input.filePath? $input.path? $input.file?] | where {|path| $path != null}
     } | flatten | where {|path| $path != null} | uniq)
     {
-        status: (if $timed_out { "timed_out" } else if $exit_code == 0 { "completed" } else { "failed" })
+        status: (if $cancelled { "cancelled" } else if $timed_out { "timed_out" } else if $exit_code == 0 { "completed" } else { "failed" })
         backend: "opencode"
         provider: (worker-provider-id)
         model: $model
@@ -417,15 +424,22 @@ def worker-run [model: string prompt: string workstream: any packet: any session
             if $previous_lines == 0 { print --stderr $"($esc)[?25l" }
             $previous_lines = (render-console $frame $previous_lines)
         }
-        let message = (try { job recv --timeout 3sec } catch { null })
+        let message = (try { job recv --timeout 0sec } catch { null })
         if $message != null {
-            $finished = {exit_code: ($message.exit_code? | default 1), timed_out: false}
+            $finished = {exit_code: ($message.exit_code? | default 1), timed_out: false, cancelled: false}
             $done = true
         } else {
             if (((date now) - $started) | into int) >= 1200000000000 {
                 try { job kill $job } catch { }
-                $finished = {exit_code: 124, timed_out: true}
+                $finished = {exit_code: 124, timed_out: true, cancelled: false}
                 $done = true
+            } else {
+                let interrupted = (try { sleep 3sec; false } catch { true })
+                if $interrupted {
+                    try { job kill $job } catch { }
+                    $finished = {exit_code: 130, timed_out: false, cancelled: true}
+                    $done = true
+                }
             }
         }
     }
@@ -433,14 +447,14 @@ def worker-run [model: string prompt: string workstream: any packet: any session
     let duration = (((($ended - $started) | into int) / 1000000000) | math round)
     let raw = (if ($raw_path | path exists) { open --raw $raw_path } else { "" })
     let events = (parse-worker-events $raw)
-    let final_status = (if $finished.timed_out { "timed_out" } else if $finished.exit_code == 0 { "complete" } else { "failed" })
+    let final_status = (if ($finished.cancelled? | default false) { "cancelled" } else if $finished.timed_out { "timed_out" } else if $finished.exit_code == 0 { "complete" } else { "failed" })
     if $console_on {
         let final_state = (worker-console-state $events $model $started 1200 $last_event_at false $final_status)
         let frame = (console-frame $final_state (try { (term size).columns } catch { 80 }))
         $previous_lines = (render-console $frame $previous_lines)
         finish-console true $previous_lines
     }
-    let result = ((worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out) | insert agent $agent)
+    let result = ((worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out ($finished.cancelled? | default false)) | insert agent $agent)
     {summary: $result, raw_path: $raw_path, stderr_path: $stderr_path}
 }
 
