@@ -127,6 +127,22 @@ let results = [
         let failed = (worker-summary [] "mimo-v2.5" null null 1 1 false)
         assert-equal $failed.status "failed" "empty worker output fails closed"
     })
+    (test "telemetry derives timing and tool aggregates without content" {
+        let started = ((date now) - 5sec)
+        let start_ms = ((($started | into int) / 1000000) | math round | into int)
+        let events = [
+            {type: "step_start", timestamp: ($start_ms + 1000), sessionID: "ses-test"}
+            {type: "tool_use", timestamp: ($start_ms + 2000), part: {tool: "read", state: {status: "completed", input: {filePath: "secret.txt"}}}}
+            {type: "tool_use", timestamp: ($start_ms + 3000), part: {tool: "bash", state: {status: "completed", input: {command: "cargo test"}}}}
+        ]
+        let telemetry = (telemetry-derived $events $started (date now))
+        assert-equal $telemetry.tool_calls_by_type.read 1 "read count"
+        assert-equal $telemetry.tool_calls_by_type.bash 1 "verification tool count"
+        assert-equal $telemetry.files_read_count 1 "read aggregate"
+        assert-equal $telemetry.verification_commands_count 1 "verification aggregate"
+        assert (($telemetry.time_to_first_tool_seconds | into float) >= 1.0) "first tool timing"
+        assert (not (($telemetry.records | to json) | str contains "secret.txt")) "telemetry has no file content"
+    })
     (test "context threshold policy" {
         assert-equal (checkpoint-state {context_percent: 29.9}) "normal" "normal"
         assert-equal (checkpoint-state {context_percent: 35.0}) "watch" "watch"
