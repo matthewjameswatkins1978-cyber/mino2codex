@@ -383,6 +383,10 @@ def worker-command [model: string prompt: string session_id: any cwd: path agent
     $continued | append $prompt
 }
 
+def result-envelope [summary: record agent: string] {
+    $summary | insert agent $agent
+}
+
 def worker-run [model: string prompt: string workstream: any packet: any session_id: any quiet: bool = false agent: string = "build" fork: bool = false] {
     let opencode = (opencode-path)
     if ($opencode | is-empty) { error make {msg: "OpenCode is not installed. Run: npm install -g opencode-ai"} }
@@ -454,7 +458,7 @@ def worker-run [model: string prompt: string workstream: any packet: any session
         $previous_lines = (render-console $frame $previous_lines)
         finish-console true $previous_lines
     }
-    let result = ((worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out ($finished.cancelled? | default false)) | insert agent $agent)
+    let result = (result-envelope (worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out ($finished.cancelled? | default false)) $agent)
     {summary: $result, raw_path: $raw_path, stderr_path: $stderr_path}
 }
 

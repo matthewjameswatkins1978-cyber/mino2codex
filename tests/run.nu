@@ -102,6 +102,17 @@ let results = [
         assert (not (worker-fork-required "ses-old" "build" "build")) "same agent continues"
         assert (not (worker-fork-required null null "build")) "new session does not fork"
     })
+    (test "result envelope reports selected execution agent" {
+        let cases = [
+            {task: "Edit the file and run its tests", expected: "build"}
+            {task: "Plan only; do not edit files", expected: "plan"}
+            {task: "Review only, read-only, do not modify files", expected: "explore"}
+        ]
+        for case in $cases {
+            let envelope = (result-envelope (worker-summary [] "mimo-v2.5" null null 0 0 false) (worker-agent $case.task))
+            assert-equal $envelope.agent $case.expected $"agent truth for ($case.expected)"
+        }
+    })
     (test "OpenCode JSON event parsing and summary" {
         let raw = '{"type":"text","sessionID":"ses-test","part":{"text":"done"}}
 {"type":"tool_use","sessionID":"ses-test","part":{"tool":"edit","state":{"status":"completed","input":{"filePath":"src/a.nu"}}}}
