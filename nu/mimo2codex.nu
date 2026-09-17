@@ -590,6 +590,51 @@ def parse-run-args [args: list<string>] {
     {json: $machine_json, quiet: $quiet, workstream: $workstream, packet: $packet, task: ($task | str join " ")}
 }
 
+def packet-front-matter [content: string] {
+    let lines = ($content | lines)
+    if (($lines | first | default "") != "---") { {} } else {
+        let closing = ($lines | enumerate | where item == "---" | skip 1 | first)
+        if ($closing == null) { {} } else {
+            $lines | first $closing.index | skip 1 | parse --regex '^(?<key>workstream|packet|directory)\s*:\s*(?<value>.+)$' | reduce -f {} {|row, acc|
+                $acc | upsert $row.key ($row.value | str trim | str trim --char '"')
+            }
+        }
+    }
+}
+
+def packet-filename-inference [file: path] {
+    let stem = ($file | path parse | get stem | str replace --all "_" "-")
+    let parts = ($stem | split row "-" | where {|part| ($part | is-not-empty)})
+    if (($parts | length) < 2) { {} } else {
+        let candidate = ($parts | last)
+        let valid_packet = (($candidate | str replace -r '^[A-Za-z0-9]+$' "") | is-empty) and (($candidate | str replace -r '.*[0-9].*' "yes") == "yes") and (($candidate | str replace -r '.*[A-Za-z].*' "yes") == "yes")
+        if (not $valid_packet) { {} } else { {workstream: ($parts | drop 1 | str join "-"), packet: $candidate} }
+    }
+}
+
+def packet-file-details [file: path] {
+    let expanded = ($file | path expand)
+    if not ($expanded | path exists) { error make {msg: $"Packet file does not exist: ($expanded)"} }
+    let content = (open --raw $expanded)
+    {file: $expanded, content: $content, metadata: (packet-front-matter $content), inferred: (packet-filename-inference $expanded)}
+}
+
+def packet-command [model: string args: list<string>] {
+    if (($args | length) < 1) { error make {msg: "packet requires a local packet file"} }
+    let details = (packet-file-details ($args | first))
+    let rest = ($args | skip 1)
+    let parsed = (parse-run-args ($rest | append $details.content))
+    let workstream = (if ($parsed.workstream != null) { $parsed.workstream } else if (($details.metadata.workstream? | default null) != null) { $details.metadata.workstream } else { $details.inferred.workstream? | default null })
+    let packet = (if ($parsed.packet != null) { $parsed.packet } else if (($details.metadata.packet? | default null) != null) { $details.metadata.packet } else { $details.inferred.packet? | default null })
+    mut forwarded = $rest
+    if ($parsed.workstream == null) and ($workstream != null) { $forwarded = ($forwarded | append ["--workstream" $workstream] | flatten) }
+    if ($parsed.packet == null) and ($packet != null) { $forwarded = ($forwarded | append ["--packet" $packet] | flatten) }
+    $forwarded = ($forwarded | append $details.content)
+    let agent = (worker-agent $details.content)
+    print --stderr $"Packet       ($details.file | path basename)\nWorkstream   (if ($workstream == null) { "(none inferred)" } else { $workstream })\nPacket ID    (if ($packet == null) { "(none inferred)" } else { $packet })\nModel        (if $model == "mimo-v2.5" { "standard" } else { "pro" })\nAgent        ($agent)\nDirectory    (pwd | path expand)"
+    run-worker-command $model $forwarded
+}
+
 def run-worker-command [model: string args: list<string>] {
     let parsed = (parse-run-args $args)
     if ($parsed.workstream != null) and (not (valid-workstream $parsed.workstream)) { error make {msg: "Invalid workstream name"} }
@@ -679,6 +724,9 @@ def print-help [] {
     print "  m2c run --json \"task\"  emit the stable JSON result envelope"
     print "  m2c run --quiet --json \"task\"  suppress the live console"
     print "  m2c run --workstream NAME --packet ID \"task\"  continue bounded work"
+    print "  m2c packet FILE  run a Standard packet file"
+    print "  m2c standard packet FILE  run a Standard packet file"
+    print "  m2c pro packet FILE  run a Pro packet file"
     print "  m2c models          list supported models"
     print "  m2c setup           install/repair isolated MiMo configuration"
     print "  m2c doctor [--live] diagnose configuration; --live checks the worker"
@@ -868,9 +916,9 @@ export def invoke [...args: string] {
         let rest = ($args | skip 1)
         let selected = ($rest | first | default "pro")
         if $selected == "standard" { launch-codex (provider-data).models.standard ($rest | skip 1) } else if $selected == "pro" { launch-codex (provider-data).models.pro ($rest | skip 1) } else { launch-codex (provider-data).models.pro $rest }
-    } else if $command == "run" { run-worker-command (provider-data).models.pro ($args | skip 1) } else if $command == "pro" {
-        if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.pro ($args | skip 2) } else { launch-worker-interactive (provider-data).models.pro }
+    } else if $command == "run" { run-worker-command (provider-data).models.pro ($args | skip 1) } else if $command == "packet" { packet-command (provider-data).models.standard ($args | skip 1) } else if $command == "pro" {
+        if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.pro ($args | skip 2) } else if (($args | length) > 1) and (($args | get 1) == "packet") { packet-command (provider-data).models.pro ($args | skip 2) } else { launch-worker-interactive (provider-data).models.pro }
     } else if $command == "standard" {
-        if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.standard ($args | skip 2) } else { launch-worker-interactive (provider-data).models.standard }
+        if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.standard ($args | skip 2) } else if (($args | length) > 1) and (($args | get 1) == "packet") { packet-command (provider-data).models.standard ($args | skip 2) } else { launch-worker-interactive (provider-data).models.standard }
     } else { launch-worker-interactive (provider-data).models.pro }
 }

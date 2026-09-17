@@ -113,6 +113,16 @@ let results = [
             assert-equal $envelope.agent $case.expected $"agent truth for ($case.expected)"
         }
     })
+    (test "packet files use metadata then filename inference" {
+        let inferred = (packet-filename-inference "tethers-l2-L2A.md")
+        assert-equal $inferred.workstream "tethers-l2" "workstream inference"
+        assert-equal $inferred.packet "L2A" "packet inference"
+        let underscored = (packet-filename-inference "tethers_l2_L2A.md")
+        assert-equal $underscored.workstream "tethers-l2" "underscore inference"
+        let metadata = (packet-front-matter "---\nworkstream: explicit-stream\npacket: P9\n---\nDo the work.")
+        assert-equal $metadata.workstream "explicit-stream" "front matter workstream"
+        assert-equal $metadata.packet "P9" "front matter packet"
+    })
     (test "OpenCode JSON event parsing and summary" {
         let raw = '{"type":"text","sessionID":"ses-test","part":{"text":"done"}}
 {"type":"tool_use","sessionID":"ses-test","part":{"tool":"edit","state":{"status":"completed","input":{"filePath":"src/a.nu"}}}}
