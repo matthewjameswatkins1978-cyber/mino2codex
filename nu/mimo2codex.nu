@@ -127,6 +127,12 @@ def opencode-path [] {
         if ($candidate | path exists) { $candidate } else { $found }
     } else { $found }
 }
+def opencode-platform-status-for [family: string path: string] {
+    if ($path | is-empty) { {status: "missing", detail: "not found"} } else if ($family == "unix") and (($path | str lowercase | str ends-with ".exe") or ($path | str lowercase | str ends-with ".cmd") or ($path | str lowercase | str ends-with ".bat") or ($path | str lowercase | str ends-with ".ps1")) {
+        {status: "invalid", detail: "Windows executable resolved under Linux/WSL; install native Linux OpenCode or fix PATH"}
+    } else { {status: "valid", detail: $path} }
+}
+def opencode-platform-status [path: string] { opencode-platform-status-for $nu.os-info.family $path }
 def opencode-version [] {
     let path = (opencode-path)
     if ($path | is-empty) { "missing" } else { try { run-external $path "--version" | str trim } catch { "unavailable" } }
@@ -239,6 +245,85 @@ def parse-worker-events [raw: string] {
     $raw | lines | each {|line| try { $line | from json } catch { null }} | where {|item| $item != null }
 }
 
+def activity-from-event [event: any] {
+    let tool = ($event.part.tool? | default "" | str lowercase)
+    let input = ($event.part.state?.input? | default {})
+    let command = ([$input.command? $input.cmd?] | where {|value| $value != null} | first | default "" | str lowercase)
+    if $tool in ["read", "glob", "grep", "search", "list"] { "Inspecting project files" } else if $tool in ["edit", "write", "patch"] { "Updating project files" } else if ($command | str contains "test") or ($command | str contains "pytest") { "Running verification tests" } else if ($command | str contains "cargo") { "Building or checking Rust" } else if ($command | str contains "dune") or ($command | str contains "ocaml") { "Building or checking OCaml" } else if ($command | str contains "git") { "Reviewing changes" } else if ($command | str contains "checksum") or ($command | str contains "archive") { "Packaging release" } else if $event.type == "step_start" { "Working..." } else { "Working..." }
+}
+
+def human-duration [seconds: any] {
+    let value = (($seconds | default 0) | into int)
+    let minutes = ($value // 60)
+    let secs = ($value mod 60)
+    $"($minutes | fill -a right -w 2 -c '0'):($secs | fill -a right -w 2 -c '0')"
+}
+
+def worker-console-state [events: list<any> model: string started_at: any watchdog_limit: int last_event_at: any process_alive: bool status: string = "working"] {
+    let now = (date now)
+    let elapsed = (((($now - $started_at) | into int) / 1000000000) | math round)
+    let event_age = (((($now - $last_event_at) | into int) / 1000000000) | math round)
+    let summary = (worker-summary $events $model null null $elapsed (if $status == "complete" { 0 } else { 1 }) ($status == "timed_out"))
+    let quiet = ($process_alive and $event_age >= 60)
+    let waiting = ($process_alive and $event_age >= 30)
+    let worker_state = (if $status == "complete" { "COMPLETE" } else if $status == "failed" { "FAILED" } else if $status == "timed_out" { "TIMED OUT" } else if $quiet { "QUIET" } else if $waiting { "WAITING" } else if ($events | is-empty) { "STARTING" } else { "WORKING" })
+    let activity = (if $quiet { "No worker event; process still alive" } else if $waiting { "Waiting for provider..." } else { (($events | each {|event| activity-from-event $event}) | last | default "Working...") })
+    {
+        model: $model
+        provider: (worker-provider-id)
+        backend: "opencode"
+        worker_state: $worker_state
+        activity: $activity
+        elapsed: $elapsed
+        watchdog_limit: $watchdog_limit
+        watchdog_remaining: ([($watchdog_limit - $elapsed) 0] | math max)
+        last_event_age: $event_age
+        tool_calls: $summary.tool_calls
+        tool_failures: $summary.tool_failures
+        changed_files: $summary.changed_files
+        context_tokens: $summary.context_estimate_tokens
+        context_percent: $summary.context_percent
+        checkpoint_recommended: $summary.checkpoint_recommended
+        process_alive: $process_alive
+    }
+}
+
+def progress-bar [value: any max: any width: int = 20] {
+    let raw_ratio = (($value | into float) / ($max | into float))
+    let ratio = (if $raw_ratio < 0.0 { 0.0 } else if $raw_ratio > 1.0 { 1.0 } else { $raw_ratio })
+    let filled = (($ratio * $width) | math round | into int)
+    mut bar = ""
+    for i in 0..<$width { $bar = $bar + (if $i < $filled { "█" } else { "░" }) }
+    $bar
+}
+
+def console-frame [state: record width: int = 80] {
+    let narrow = $width < 72
+    let title = (if $narrow { $"MiMo ($state.model)" } else { $"MiMo Worker · ($state.provider)/($state.model)" })
+    let context = (if $state.context_percent == null { "waiting" } else { $"(($state.context_percent | into float | math round --precision 1))%" })
+    let files = ($state.changed_files | length)
+    if $narrow {
+        [$"╭─ ($title) ─╮" $"│ ● ($state.worker_state)" $"│ ($state.activity)" $"│ (human-duration $state.elapsed) · watchdog (human-duration $state.watchdog_remaining)" $"│ tools ($state.tool_calls) · failures ($state.tool_failures) · ctx ($context)" "╰────────────────────────────╯"]
+    } else {
+        [$"╭─ ($title) ─────────────────────────────────────────────╮" $"│ ● ($state.worker_state)" "│" $"│  ($state.activity)" "│" $"│  Elapsed     (human-duration $state.elapsed)        Watchdog     (human-duration $state.watchdog_remaining)" $"│  Tools       ($state.tool_calls)        Failures     ($state.tool_failures)" $"│  Context     ($context)        Last event   (human-duration $state.last_event_age) ago" $"│  Files changed  ($files)" $"│" $"│  Time  (progress-bar $state.elapsed $state.watchdog_limit)  (human-duration $state.elapsed) / (human-duration $state.watchdog_limit)" $"│  Ctx   (if $state.context_percent == null { "waiting" } else { progress-bar $state.context_percent 100.0 })" "╰────────────────────────────────────────────────────────────╯"]
+    }
+}
+
+def console-enabled [quiet: bool] {
+    if $quiet { false } else if (($env.M2C_FORCE_TTY? | default "") == "1") { true } else { $nu.is-interactive }
+}
+
+def render-console [frame: list<string> previous_lines: int = 0] {
+    let esc = (char --integer 27)
+    if $previous_lines > 0 { print --stderr $"($esc)[($previous_lines)A" }
+    $frame | each {|line| print --stderr $"($esc)[2K($line)" }
+    $frame | length
+}
+
+def finish-console [enabled: bool previous_lines: int] {
+    if $enabled { let esc = (char --integer 27); print --stderr $"($esc)[?25h"; if $previous_lines > 0 { print --stderr "" } }
+}
+
 def worker-summary [events: list<any> model: string workstream: any packet: any duration: any exit_code: int timed_out: bool] {
     let sessions = ($events | get sessionID? | default [] | where {|x| $x != null} | uniq)
     let finishes = ($events | where type == "step_finish")
@@ -284,7 +369,7 @@ def worker-command [model: string prompt: string session_id: any cwd: path] {
     $continued | append $prompt
 }
 
-def worker-run [model: string prompt: string workstream: any packet: any session_id: any] {
+def worker-run [model: string prompt: string workstream: any packet: any session_id: any quiet: bool = false] {
     let opencode = (opencode-path)
     if ($opencode | is-empty) { error make {msg: "OpenCode is not installed. Run: npm install -g opencode-ai"} }
     let credential = (credential-info)
@@ -299,20 +384,55 @@ def worker-run [model: string prompt: string workstream: any packet: any session
     let started = (date now)
     let job = (job spawn --description $"m2c OpenCode worker ($model)" {
         with-env $environment {
-            let result = (run-external $opencode ...$command | complete)
-            $result.stdout | save --force $raw_path
-            $result.stderr | save --force $stderr_path
-            {exit_code: $result.exit_code} | job send 0
+            try {
+                run-external $opencode ...$command | save --force $raw_path
+                {exit_code: ($env.LAST_EXIT_CODE? | default 0)} | job send 0
+            } catch {
+                {exit_code: ($env.LAST_EXIT_CODE? | default 1)} | job send 0
+            }
         }
     })
-    let finished = (try { job recv --timeout 20min; {exit_code: 0, timed_out: false} } catch {
-        try { job kill $job } catch { }
-        {exit_code: 124, timed_out: true}
-    })
+    let console_on = (console-enabled $quiet)
+    mut previous_lines = 0
+    mut last_event_at = $started
+    mut last_size = -1
+    mut finished: any = null
+    mut done = false
+    while not $done {
+        let raw = (if ($raw_path | path exists) { open --raw $raw_path } else { "" })
+        let size = ($raw | str length)
+        if $size != $last_size { $last_event_at = (date now); $last_size = $size }
+        let events = (parse-worker-events $raw)
+        let state = (worker-console-state $events $model $started 1200 $last_event_at true)
+        if $console_on {
+            let frame = (console-frame $state (try { (term size).columns } catch { 80 }))
+            let esc = (char --integer 27)
+            if $previous_lines == 0 { print --stderr $"($esc)[?25l" }
+            $previous_lines = (render-console $frame $previous_lines)
+        }
+        let message = (try { job recv --timeout 3sec } catch { null })
+        if $message != null {
+            $finished = {exit_code: ($message.exit_code? | default 1), timed_out: false}
+            $done = true
+        } else {
+            if (((date now) - $started) | into int) >= 1200000000000 {
+                try { job kill $job } catch { }
+                $finished = {exit_code: 124, timed_out: true}
+                $done = true
+            }
+        }
+    }
     let ended = (date now)
     let duration = (((($ended - $started) | into int) / 1000000000) | math round)
     let raw = (if ($raw_path | path exists) { open --raw $raw_path } else { "" })
     let events = (parse-worker-events $raw)
+    let final_status = (if $finished.timed_out { "timed_out" } else if $finished.exit_code == 0 { "complete" } else { "failed" })
+    if $console_on {
+        let final_state = (worker-console-state $events $model $started 1200 $last_event_at false $final_status)
+        let frame = (console-frame $final_state (try { (term size).columns } catch { 80 }))
+        $previous_lines = (render-console $frame $previous_lines)
+        finish-console true $previous_lines
+    }
     let result = (worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out)
     {summary: $result, raw_path: $raw_path, stderr_path: $stderr_path}
 }
@@ -326,6 +446,7 @@ def worker-context-prefix [state: any] {
 
 def parse-run-args [args: list<string>] {
     mut machine_json = false
+    mut quiet = false
     mut workstream: any = null
     mut packet: any = null
     mut task = []
@@ -334,6 +455,8 @@ def parse-run-args [args: list<string>] {
         let arg = ($args | get $index)
         if $arg == "--json" {
             $machine_json = true
+        } else if $arg == "--quiet" {
+            $quiet = true
         } else if $arg == "--workstream" {
             $index = $index + 1
             if $index >= ($args | length) { error make {msg: "--workstream requires a name"} }
@@ -349,7 +472,7 @@ def parse-run-args [args: list<string>] {
     }
     if ($task | is-empty) { error make {msg: "m2c run requires a bounded task"} }
     if ($packet != null) and ($workstream == null) { error make {msg: "--packet requires --workstream"} }
-    {json: $machine_json, workstream: $workstream, packet: $packet, task: ($task | str join " ")}
+    {json: $machine_json, quiet: $quiet, workstream: $workstream, packet: $packet, task: ($task | str join " ")}
 }
 
 def run-worker-command [model: string args: list<string>] {
@@ -364,7 +487,7 @@ def run-worker-command [model: string args: list<string>] {
         if $policy == "mandatory" { error make {msg: "Workstream requires a checkpoint before another substantive packet"} }
     }
     let prompt = $"($parsed.task)(worker-context-prefix $state)\n\nReturn a concise completion report with files changed, tests run and results, unresolved issues, and any evidence needed for verification."
-    let run = (worker-run $model $prompt $parsed.workstream $parsed.packet ($state.session_id? | default null))
+    let run = (worker-run $model $prompt $parsed.workstream $parsed.packet ($state.session_id? | default null) $parsed.quiet)
     let summary = $run.summary
     if ($parsed.workstream != null) {
         let old_generation = ($state.checkpoint_generation? | default 0)
@@ -432,6 +555,7 @@ def print-help [] {
     print "  m2c standard        launch the standard worker interactively"
     print "  m2c run \"task\"     run one bounded machine worker packet"
     print "  m2c run --json \"task\"  emit the stable JSON result envelope"
+    print "  m2c run --quiet --json \"task\"  suppress the live console"
     print "  m2c run --workstream NAME --packet ID \"task\"  continue bounded work"
     print "  m2c models          list supported models"
     print "  m2c setup           install/repair isolated MiMo configuration"
@@ -477,6 +601,8 @@ def doctor [args: list<string> = []] {
     let config = (state-root | path join "codex-home" | path join "config.toml")
     let catalogue_path = (catalogue-path)
     let opencode = (opencode-version)
+    let opencode_path = (opencode-path)
+    let opencode_platform = (opencode-platform-status $opencode_path)
     let skill = (skill-path)
     let direct_live = (if $live { live-check $credential } else { "SKIP" })
     let worker_live = (if ($live and ($opencode != "missing")) { worker-live-check (provider-data).models.standard } else { "SKIP" })
@@ -484,7 +610,7 @@ def doctor [args: list<string> = []] {
         (check-row "Platform" (if (["windows", "unix"] | any {|x| $x == $nu.os-info.family}) { "PASS" } else { "FAIL" }) $nu.os-info.name)
         (check-row "Nushell" "PASS" (nu-version))
         (check-row "Codex" (if $codex_ok { "PASS" } else { "FAIL" }) (if $codex_ok { (read-codex-version) } else { "not found" }))
-        (check-row "OpenCode" (if ($opencode == "missing") { "FAIL" } else { "PASS" }) $opencode)
+        (check-row "OpenCode" (if ($opencode == "missing") { "FAIL" } else if $opencode_platform.status == "invalid" { "FAIL" } else { "PASS" }) (if $opencode_platform.status == "invalid" { $opencode_platform.detail } else { $opencode }))
         (check-row "MiMo config directory" (if (state-root | path exists) { "PASS" } else { "FAIL" }) (state-root))
         (check-row "Isolated CODEX_HOME" (if (state-root | path join "codex-home" | path exists) { "PASS" } else { "FAIL" }) (state-root | path join "codex-home"))
         (check-row "MiMo config.toml" (if ($config | path exists) { "PASS" } else { "FAIL" }) $config)
