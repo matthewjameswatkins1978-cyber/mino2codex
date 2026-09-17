@@ -1,7 +1,34 @@
 # Architecture
 
-Nushell owns policy, path construction, configuration generation, credential loading, diagnostics, and process launching. Codex remains the only inference client.
+`m2c` is the stable control surface. Nushell owns model selection, credential injection, runtime configuration, workstream state, timeout policy, JSON event parsing, and the result envelope. OpenCode is the replaceable MiMo execution engine.
 
-`nu/mimo2codex.nu` is copied by `nu install.nu` into Nushell's user data and autoload directories. Static provider/model data is copied under the same private application root. The launcher then sets `CODEX_HOME` to that root's `codex-home` directory and runs the installed `codex` executable directly.
+## Worker path
 
-The only semantic model mapping is `config/mimo.json`; detailed model capability metadata is in `config/model-catalogs.json`, based on Xiaomi's current Codex guide. No credential is present in either file.
+```text
+coordinating Codex/Lucy
+        |
+        v
+m2c run --model/packet/workstream
+        |
+        v
+OpenCode run --format json --dir <cwd>
+        |
+        v
+m2c-mimo / Xiaomi OpenAI-compatible endpoint
+```
+
+Each run injects `OPENCODE_CONFIG_CONTENT` containing only the m2c-owned `m2c-mimo` provider, both supported MiMo models, the AMS endpoint, a provider allowlist, and machine-mode permissions. The model is always explicit; there is no provider fallback or implicit OpenCode model.
+
+OpenCode JSONL is an implementation format. m2c parses it into a small stable envelope and retains raw events only as local job evidence. Textual pseudo-tool calls are never parsed or executed.
+
+## Workstreams
+
+Workstream state lives outside repositories. It records cwd, model, OpenCode session ID, packet, timestamps, context estimate, checkpoint generation, and an intentional checkpoint. Cwd/model mismatch fails closed. A checkpoint clears the session ID; the next packet starts a fresh session with the checkpoint injected as context.
+
+## Direct Codex path
+
+The original direct MiMo Responses path remains available as `m2c codex [standard|pro]` for inference experiments and future upstream regression testing. It is explicitly experimental because MiMo Responses tool behaviour is currently incompatible with reliable Codex execution. It is not the worker backend.
+
+## Installation
+
+`nu install.nu` installs the Nushell module, static provider data, and autoload wrapper under Nushell's platform-aware data/autoload directories. `m2c setup` generates the direct-Codex files, detects OpenCode, and installs only the m2c-owned `mimo-worker` skill under the normal Codex skills directory (or the test override). No global `AGENTS.md` is modified.

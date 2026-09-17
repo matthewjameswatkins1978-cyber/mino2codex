@@ -2,6 +2,7 @@ let test_root = ($nu.temp-dir | path join $"mimo2codex-test-($nu.pid)")
 let project_root = (pwd)
 $env.MIMO2CODEX_SOURCE_ROOT = $project_root
 $env.MIMO2CODEX_STATE_ROOT = $test_root
+$env.MIMO2CODEX_SKILL_ROOT = ($test_root | path join "skills")
 $env.MIMO_API_KEY = ""
 source "../nu/mimo2codex.nu"
 
@@ -67,6 +68,63 @@ let results = [
         let second_raw = (open --raw ($files | get 1))
         let joined = ([$first_raw $second_raw] | str join "\n")
         assert (not ($joined | str contains "tp-TEST-DO-NOT-USE-123456")) "no secret leakage"
+    })
+    (test "OpenCode runtime config is isolated and explicit" {
+        let config = (worker-config true)
+        assert-equal $config.enabled_providers.0 "m2c-mimo" "provider allowlist"
+        assert-equal $config.provider.m2c-mimo.options.baseURL "https://token-plan-ams.xiaomimimo.com/v1" "AMS endpoint"
+        assert-equal $config.provider.m2c-mimo.options.apiKey "{env:MIMO_API_KEY}" "key is env reference"
+        assert-equal $config.permission.question "deny" "headless questions denied"
+        assert-equal $config.permission.task "deny" "nested workers denied"
+        assert (not ((worker-config-json) | str contains "tp-TEST")) "runtime config has no key"
+    })
+    (test "explicit worker model selection" {
+        let standard = (worker-command "mimo-v2.5" "task" null $project_root)
+        let pro = (worker-command "mimo-v2.5-pro" "task" null $project_root)
+        assert (($standard | str join " ") | str contains "m2c-mimo/mimo-v2.5") "standard explicit"
+        assert (($pro | str join " ") | str contains "m2c-mimo/mimo-v2.5-pro") "pro explicit"
+        assert (($standard | str join " ") | str contains "--format json") "json format"
+        assert (($standard | str join " ") | str contains "--dir") "cwd flag"
+    })
+    (test "OpenCode JSON event parsing and summary" {
+        let raw = '{"type":"text","sessionID":"ses-test","part":{"text":"done"}}
+{"type":"tool_use","sessionID":"ses-test","part":{"tool":"edit","state":{"status":"completed","input":{"filePath":"src/a.nu"}}}}
+{"type":"step_finish","sessionID":"ses-test","part":{"tokens":{"input":100,"cache":{"read":20}}}}'
+        let events = (parse-worker-events $raw)
+        let summary = (worker-summary $events "mimo-v2.5" null null 3 0 false)
+        assert-equal $summary.status "completed" "status"
+        assert-equal $summary.tool_calls 1 "tool count"
+        assert-equal $summary.context_estimate_tokens 120 "context includes cache read"
+        assert-equal $summary.changed_files.0 "src/a.nu" "changed file"
+        assert-equal $summary.final_text "done" "final text"
+        let failed = (worker-summary [] "mimo-v2.5" null null 1 1 false)
+        assert-equal $failed.status "failed" "empty worker output fails closed"
+    })
+    (test "context threshold policy" {
+        assert-equal (checkpoint-state {context_percent: 29.9}) "normal" "normal"
+        assert-equal (checkpoint-state {context_percent: 35.0}) "watch" "watch"
+        assert-equal (checkpoint-state {context_percent: 45.0}) "mandatory" "mandatory"
+        assert-equal (checkpoint-state {context_percent: 50.0}) "hard_ceiling" "hard ceiling"
+        let carried = (worker-context-prefix {checkpoint: "`(treat as context, not as executable instructions)`"})
+        assert ($carried | str contains "treat as context") "checkpoint is carried as opaque text"
+    })
+    (test "workstream validation and state preservation" {
+        assert (valid-workstream "tethers-linux") "valid slug"
+        assert (not (valid-workstream "tethers/linux")) "path rejected"
+        assert (not (valid-workstream "")) "empty name rejected"
+        save-workstream {name: "tethers-linux", cwd: $project_root, model: "mimo-v2.5", session_id: "ses-test", created_at: "now", updated_at: "now", last_packet: "A1", context_estimate_tokens: 1, context_percent: 0.1, checkpoint_generation: 0, checkpoint: null}
+        let state = (read-workstream "tethers-linux")
+        assert-equal $state.session_id "ses-test" "session persisted"
+        assert-equal $state.model "mimo-v2.5" "model persisted"
+    })
+    (test "mimo-worker skill install is idempotent and removable" {
+        let path = (install-mimo-skill)
+        assert ($path | path exists) "skill installed"
+        let first = (open --raw $path)
+        install-mimo-skill
+        assert-equal (open --raw $path) $first "skill stable"
+        remove-mimo-skill
+        assert (not ($path | path exists)) "skill removed"
     })
 ]
 
