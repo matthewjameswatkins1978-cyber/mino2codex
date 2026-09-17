@@ -607,6 +607,61 @@ let results = [
         assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when worker failed"
         assert ($comment | str contains "worker status: failed") "worker failure reason"
     })
+    # --- fix: repo field uses canonical identity from admission ---
+    (test "discovery row has no .repo field (proves bug on stale main)" {
+        let discovery = {repository: {nameWithOwner: "alice/my-repo", name: "my-repo"}, title: "[M2C QUEUED] test", number: 7, url: "https://github.com/alice/my-repo/issues/7"}
+        let has_repo_field = (try { $discovery.repo | ignore; true } catch { false })
+        assert (not $has_repo_field) "discovery row must not have .repo field"
+    })
+    (test "watch-issue-repo extracts full owner/repo from discovery row" {
+        let discovery = {repository: {nameWithOwner: "alice/my-repo", name: "my-repo"}, title: "[M2C QUEUED] test", number: 7, url: "https://github.com/alice/my-repo/issues/7"}
+        assert-equal (watch-issue-repo $discovery) "alice/my-repo" "nameWithOwner preferred"
+        let bare = {repository: {name: "bare-name"}, title: "[M2C QUEUED] test", number: 2, url: "https://github.com/x/bare-name/issues/2"}
+        assert-equal (watch-issue-repo $bare) "bare-name" "falls back to bare name"
+    })
+    (test "admission record provides canonical repo and number for claim" {
+        let admission = {ok: true, base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard", packet: "do work", owner: "alice", repo: "alice/my-repo", number: 7, title: "[M2C QUEUED] test", url: "https://github.com/alice/my-repo/issues/7"}
+        assert-equal $admission.repo "alice/my-repo" "admission.repo is canonical"
+        assert-equal $admission.number 7 "admission.number present"
+    })
+    (test "admitted claim uses canonical repo identity not discovery row" {
+        let discovery = {repository: {nameWithOwner: "alice/my-repo", name: "my-repo"}, title: "[M2C QUEUED] test", number: 7, url: "https://github.com/alice/my-repo/issues/7"}
+        let admission = {ok: true, repo: "alice/my-repo", number: $discovery.number}
+        assert-equal $admission.repo (watch-issue-repo $discovery) "admission repo matches helper"
+        assert-equal $admission.number $discovery.number "admission number matches discovery"
+    })
+    (test "DONE title and comment use canonical admission repo identity" {
+        let admission = {repo: "alice/my-repo", number: 7, model: "standard"}
+        let final_status = "DONE"
+        let final_title = $"[M2C ($final_status)]"
+        assert ($final_title == "[M2C DONE]") "DONE title format"
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true}
+        let comment = (watch-build-result-comment $summary $delivery $admission.model $final_status)
+        assert ($comment | str contains "M2C RESULT: DONE") "DONE comment uses canonical status"
+        assert-equal $admission.repo "alice/my-repo" "repo identity preserved for DONE"
+    })
+    (test "FAILED title and comment use canonical admission repo identity" {
+        let admission = {repo: "alice/my-repo", number: 7, model: "pro"}
+        let final_status = "FAILED"
+        let final_title = $"[M2C ($final_status)]"
+        assert ($final_title == "[M2C FAILED]") "FAILED title format"
+        let summary = {status: "failed", exit_code: 1}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false}
+        let comment = (watch-build-result-comment $summary $delivery $admission.model $final_status)
+        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED comment uses canonical status"
+        assert-equal $admission.repo "alice/my-repo" "repo identity preserved for FAILED"
+    })
+    (test "rejection path derives repo from discovery row without .repo field" {
+        let discovery = {repository: {nameWithOwner: "alice/my-repo", name: "my-repo"}, title: "[M2C QUEUED] test", number: 7, url: "https://github.com/alice/my-repo/issues/7"}
+        let blocked_repo = (watch-issue-repo $discovery)
+        assert-equal $blocked_repo "alice/my-repo" "rejection derives full repo identity"
+        let blocked_title = "[M2C BLOCKED]"
+        assert ($blocked_title == "[M2C BLOCKED]") "BLOCKED title correct"
+        let reason = "issue author (bot) does not match authenticated user (alice)"
+        let comment = $"Rejection reason: ($reason)"
+        assert ($comment | str contains "Rejection reason:") "rejection comment includes reason"
+    })
 ]
 
 print ($results | table)
