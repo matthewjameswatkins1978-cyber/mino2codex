@@ -118,6 +118,62 @@ def model-records [] {
 }
 
 def version-value [] { open (source-root | path join "VERSION") | str trim }
+def source-hash-short [] { try { open --raw (source-root | path join "mimo2codex.nu") | hash sha256 | str substring 0..7 } catch { "unknown" } }
+def startup-identity [] { $"m2c (version-value) · (source-hash-short)" }
+
+def controller-lock-path [] { state-root | path join "controller.lock" }
+
+def controller-acquire-lock [] {
+    let lock_path = (controller-lock-path)
+    let lock_dir = (state-root)
+    mkdir $lock_dir
+    if ($lock_path | path exists) {
+        let lock_data = (try { open --raw $lock_path | from json } catch { null })
+        if ($lock_data != null) {
+            let pid = ($lock_data.pid? | default 0)
+            let alive = (if $nu.os-info.family == "unix" {
+                let probe = (do { run-external "kill" "-0" ($pid | into string) } | complete)
+                $probe.exit_code == 0
+            } else {
+                let probe = (do { run-external "tasklist" "/FI" $"PID eq ($pid)" } | complete)
+                ($probe.exit_code == 0) and ($probe.stdout | str contains ($pid | into string))
+            })
+            if $alive {
+                {ok: false, reason: $"m2c watcher already active · pid ($pid) · ($lock_data.slots? | default 1) active slots"}
+            } else {
+                rm $lock_path
+                {ok: true}
+            }
+        } else {
+            rm $lock_path
+            {ok: true}
+        }
+    } else {
+        {ok: true}
+    }
+}
+
+def controller-write-lock [slots: int] {
+    let lock_path = (controller-lock-path)
+    {pid: $nu.pid, slots: $slots, started_at: (iso-now-utc), version: (version-value)} | to json | save --force $lock_path
+}
+
+def controller-release-lock [] {
+    let lock_path = (controller-lock-path)
+    if ($lock_path | path exists) { rm $lock_path }
+}
+
+def controller-running-jobs [] {
+    let root = (job-root)
+    if ($root | path exists) {
+        ls $root | where type == dir | get name | each {|p|
+            let job_id = ($p | path basename)
+            let manifest = (flight-read-manifest $job_id)
+            let result = (flight-read-result $job_id)
+            if ($manifest != null) and ($result == null) { $manifest } else { null }
+        } | where {|m| $m != null}
+    } else { [] }
+}
 def nu-version [] { run-external $nu.current-exe "--version" | str trim }
 def version-at [root: path] { try { open ($root | path join "VERSION") | str trim } catch { "unknown" } }
 def file-hash-at [root: path] { try { open --raw ($root | path join "mimo2codex.nu") | hash sha256 } catch { "unknown" } }
@@ -159,6 +215,12 @@ def opencode-version [] {
 }
 
 def worker-provider-id [] { "m2c-mimo" }
+
+def worker-dispatch [worker: string profile: string prompt: string workstream: any packet: any session_id: any quiet: bool agent: string fork: bool cwd: path budget_minutes: int] {
+    if $worker != "mimo" { error make {msg: $"unknown worker: ($worker); only mimo is supported"} }
+    let model_id = (if $profile == "pro" { (provider-data).models.pro } else { (provider-data).models.standard })
+    worker-run $model_id $prompt $workstream $packet $session_id $quiet $agent $fork $cwd $budget_minutes
+}
 def worker-model [model: string] { $"(worker-provider-id)/($model)" }
 def worker-agent [task: string] {
     let text = ($task | str lowercase | str trim)
@@ -259,6 +321,77 @@ def save-workstream [state: record] {
     $state | to json | save --force (workstream-path $state.name)
 }
 def iso-now [] { date now | format date "%Y-%m-%dT%H:%M:%S%z" }
+def iso-now-utc [] {
+    let now = (date now)
+    let offset_str = ($now | format date "%:z")
+    if $offset_str == "+00:00" {
+        $now | format date "%Y-%m-%dT%H:%M:%SZ"
+    } else {
+        let sign = (if ($offset_str | str starts-with "-") { -1 } else { 1 })
+        let parts = ($offset_str | str substring 1.. | split row ":")
+        let hours = ($parts.0 | into int)
+        let minutes = ($parts.1 | into int)
+        let total_minutes = (($hours * 60) + $minutes)
+        let utc_now = ($now - ($total_minutes * $sign | into duration --unit min))
+        $utc_now | format date "%Y-%m-%dT%H:%M:%SZ"
+    }
+}
+
+def redact-secrets [text: string] {
+    $text
+    | str replace --all --regex 'tp-[A-Za-z0-9_-]{10,}' '[REDACTED_KEY]'
+    | str replace --all --regex '(api[_-]?key|token|secret|password|auth|bearer)[:=]\s*\S+' '$1=[REDACTED]'
+    | str replace --all --regex '(?i)bearer\s+[A-Za-z0-9._-]{20,}' 'bearer [REDACTED_TOKEN]'
+    | str replace --all --regex 'sk-[A-Za-z0-9]{20,}' '[REDACTED_SK]'
+    | str replace --all --regex 'ghp_[A-Za-z0-9]{20,}' '[REDACTED_GH]'
+}
+
+def flight-job-dir [job_id: string] { job-root | path join $job_id }
+
+def flight-write-manifest [job_id: string manifest: record] {
+    let dir = (flight-job-dir $job_id)
+    mkdir $dir
+    $manifest | to json | save --force ($dir | path join "manifest.json")
+}
+
+def flight-append-event [job_id: string event: record] {
+    let dir = (flight-job-dir $job_id)
+    mkdir $dir
+    let path = ($dir | path join "events.jsonl")
+    let safe_event = ($event | transpose key value | each {|row| {key: $row.key, value: (if ($row.value | describe) == "string" { redact-secrets $row.value } else { $row.value })}} | transpose -ird)
+    let line = ($safe_event | insert timestamp (iso-now-utc) | to json -r)
+    if ($path | path exists) { $"\n($line)" | save --append $path } else { $line | save --force $path }
+}
+
+def flight-write-result [job_id: string result: record] {
+    let dir = (flight-job-dir $job_id)
+    mkdir $dir
+    $result | to json | save --force ($dir | path join "result.json")
+}
+
+def flight-read-manifest [job_id: string] {
+    let path = (flight-job-dir $job_id | path join "manifest.json")
+    if ($path | path exists) { open $path } else { null }
+}
+
+def flight-read-result [job_id: string] {
+    let path = (flight-job-dir $job_id | path join "result.json")
+    if ($path | path exists) { open $path } else { null }
+}
+
+def flight-read-events [job_id: string] {
+    let path = (flight-job-dir $job_id | path join "events.jsonl")
+    if ($path | path exists) { open --raw $path | lines | each {|line| try { $line | from json } catch { null }} | where {|x| $x != null} } else { [] }
+}
+
+def flight-list-jobs [] {
+    let root = (job-root)
+    if ($root | path exists) { ls $root | where type == dir | get name | each {|p| $p | path basename } | sort } else { [] }
+}
+
+def normalize-failure-signature [summary: record delivery: record category: string] {
+    if $category == "TIMED_OUT" { "watchdog_timeout" } else if (($summary.status == "failed") and ($summary.exit_code == -9)) { "process_sigkill" } else if (($summary.status == "failed") and ($summary.exit_code != 0) and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match and $delivery.branch_match) { "worker_exit_nonzero" } else if (($summary.status == "completed") and (($delivery.changed_file_count? | default 0) == 0) and (not $delivery.remote_exists)) { "worker_zero_exit_no_changes" } else if (not $delivery.branch_match) { "branch_mismatch" } else if (not $delivery.remote_exists) { "remote_missing" } else if (not $delivery.sha_match) { "remote_sha_mismatch" } else if (not $delivery.worktree_clean) { "dirty_worktree" } else if ($summary.status == "failed") { "worker_exit_nonzero" } else { "unknown" }
+}
 
 def context-percent [tokens: any] {
     if ($tokens == null) { null } else { (($tokens | into float) / 1048576.0) * 100.0 }
@@ -493,6 +626,16 @@ def watchdog-limit-from-budget [budget_minutes: int] {
     if ($override | is-not-empty) { try { (($override | into int) * 1000000) } catch { ($budget_minutes * 60 * 1000000000) } } else { ($budget_minutes * 60 * 1000000000) }
 }
 
+def soft-deadline-ns [budget_minutes: int] {
+    let hard = (watchdog-limit-from-budget $budget_minutes)
+    ($hard * 80) / 100
+}
+
+def closeout-reserve-ns [budget_minutes: int] {
+    let hard = (watchdog-limit-from-budget $budget_minutes)
+    ($hard * 10) / 100
+}
+
 def worker-command [model: string prompt: string session_id: any cwd: path agent: string = "build" fork: bool = false] {
     let base = ["run" "--pure" "--model" (worker-model $model) "--agent" $agent "--format" "json" "--dir" ($cwd | path expand)]
     let continued = (if ($session_id == null) { $base } else if $fork { $base | append ["--session" $session_id "--fork"] } else { $base | append ["--session" $session_id] })
@@ -518,12 +661,18 @@ def worker-run [model: string prompt: string workstream: any packet: any session
     let started = (date now)
     let watchdog_ns = (watchdog-limit-from-budget $budget_minutes)
     let watchdog_seconds = (($watchdog_ns / 1000000000) | math round | into int)
+    let soft_ns = (soft-deadline-ns $budget_minutes)
+    let closeout_ns = (closeout-reserve-ns $budget_minutes)
     let mailbox_tag = (worker-mailbox-tag)
     let job = (job spawn --description $"m2c OpenCode worker ($model)" {
         with-env $environment {
             try {
-                run-external $opencode ...$command | save --force $raw_path
-                {exit_code: ($env.LAST_EXIT_CODE? | default 0)} | job send 0 --tag $mailbox_tag
+                let result = (run-external $opencode ...$command | complete)
+                $result.stdout | save --force $raw_path
+                if ($result.stderr? | default "" | is-not-empty) {
+                    $result.stderr | save --force $stderr_path
+                }
+                {exit_code: ($result.exit_code? | default 0)} | job send 0 --tag $mailbox_tag
             } catch {
                 {exit_code: ($env.LAST_EXIT_CODE? | default 1)} | job send 0 --tag $mailbox_tag
             }
@@ -537,6 +686,7 @@ def worker-run [model: string prompt: string workstream: any packet: any session
     mut done = false
     mut last_render_at = $started
     mut rendered_event_count = 0
+    mut soft_deadline_hit = false
     while not $done {
         let raw = (if ($raw_path | path exists) { open --raw $raw_path } else { "" })
         let size = ($raw | str length)
@@ -555,20 +705,24 @@ def worker-run [model: string prompt: string workstream: any packet: any session
             $last_render_at = (date now)
             $rendered_event_count = ($events | length)
         }
+        let elapsed_ns = (((date now) - $started) | into int)
+        if (not $soft_deadline_hit) and ($elapsed_ns >= $soft_ns) {
+            $soft_deadline_hit = true
+        }
         let message = (try { job recv --tag $mailbox_tag --timeout 0sec } catch { null })
         if $message != null {
-            $finished = {exit_code: ($message.exit_code? | default 1), timed_out: false, cancelled: false}
+            $finished = {exit_code: ($message.exit_code? | default 1), timed_out: false, cancelled: false, soft_deadline_hit: $soft_deadline_hit}
             $done = true
         } else {
-            if (((date now) - $started) | into int) >= $watchdog_ns {
+            if $elapsed_ns >= $watchdog_ns {
                 try { job kill $job } catch { }
-                $finished = {exit_code: 124, timed_out: true, cancelled: false}
+                $finished = {exit_code: 124, timed_out: true, cancelled: false, soft_deadline_hit: $soft_deadline_hit}
                 $done = true
             } else {
                 let interrupted = (try { sleep 3sec; false } catch { true })
                 if $interrupted {
                     try { job kill $job } catch { }
-                    $finished = {exit_code: 130, timed_out: false, cancelled: true}
+                    $finished = {exit_code: 130, timed_out: false, cancelled: true, soft_deadline_hit: $soft_deadline_hit}
                     $done = true
                 }
             }
@@ -592,7 +746,9 @@ def worker-run [model: string prompt: string workstream: any packet: any session
         finish-console true $previous_lines
     }
     let result = (result-envelope (worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out ($finished.cancelled? | default false) $telemetry_summary $budget_minutes) $agent)
-    {summary: $result, raw_path: $raw_path, stderr_path: $stderr_path}
+    let stderr_exists = ($stderr_path | path exists)
+    let stderr_size = (if $stderr_exists { try { open --raw $stderr_path | str length } catch { 0 } } else { 0 })
+    {summary: ($result | insert soft_deadline_hit ($finished.soft_deadline_hit? | default false) | insert stderr_exists $stderr_exists | insert stderr_bytes $stderr_size), raw_path: $raw_path, stderr_path: $stderr_path}
 }
 
 def worker-context-prefix [state: any] {
@@ -760,29 +916,39 @@ def print-help [] {
     print "Usage: m2c [command] [arguments...]"
     print ""
     print "Commands:"
-    print "  m2c                 launch the MiMo OpenCode worker interactively"
-    print "  m2c pro             launch the Pro worker interactively"
-    print "  m2c standard        launch the standard worker interactively"
-    print "  m2c run \"task\"     run one bounded machine worker packet"
-    print "  m2c run --json \"task\"  emit the stable JSON result envelope"
+    print "  m2c                         launch the MiMo OpenCode worker interactively"
+    print "  m2c pro                     launch the Pro worker interactively"
+    print "  m2c standard                launch the standard worker interactively"
+    print "  m2c run \"task\"             run one bounded machine worker packet"
+    print "  m2c run --json \"task\"      emit the stable JSON result envelope"
     print "  m2c run --quiet --json \"task\"  suppress the live console"
     print "  m2c run --workstream NAME --packet ID \"task\"  continue bounded work"
-    print "  m2c packet FILE  run a Standard packet file"
-    print "  m2c standard packet FILE  run a Standard packet file"
-    print "  m2c pro packet FILE  run a Pro packet file"
-    print "  m2c models          list supported models"
-    print "  m2c setup           install/repair isolated MiMo configuration"
-    print "  m2c doctor [--live] diagnose configuration; --live checks the worker"
+    print "  m2c packet FILE             run a Standard packet file"
+    print "  m2c standard packet FILE    run a Standard packet file"
+    print "  m2c pro packet FILE         run a Pro packet file"
+    print "  m2c models                  list supported models"
+    print "  m2c setup                   install/repair isolated MiMo configuration"
+    print "  m2c doctor [--live]         diagnose configuration; --live checks the worker"
     print "  m2c checkpoint --workstream NAME  checkpoint a workstream"
-    print "  m2c codex [standard|pro]  experimental direct Codex route"
-    print "  m2c key status      show credential status without revealing it"
-    print "  m2c watch           watch GitHub for queued jobs and run them"
-    print "  m2c watch --once    check for one job, process it, then exit"
-    print "  m2c key replace     replace the locally stored credential"
-    print "  m2c key remove      remove the locally stored credential"
-    print "  m2c uninstall       remove the installed command, state and m2c skill"
-    print "  m2c version         show the installed version"
-    print "  m2c help            show this help"
+    print "  m2c codex [standard|pro]    experimental direct Codex route"
+    print "  m2c key status              show credential status without revealing it"
+    print "  m2c status                  show m2c status and recent jobs"
+    print "  m2c queue                   show queued jobs"
+    print "  m2c stats                   show job statistics"
+    print "  m2c stats --recent 20       show statistics for last 20 jobs"
+    print "  m2c failures                show failed jobs"
+    print "  m2c inspect <job-id>        show flight recorder timeline for a job"
+    print "  m2c doctor --recent         diagnose and show recent job health"
+    print "  m2c watch                   watch GitHub (one job, then return)"
+    print "  m2c watch --stay             persistent watcher"
+    print "  m2c watch --stay --jobs 2    persistent watcher with 2 slots (requires --stay, max 3)"
+    print "  m2c watch --check            one non-waiting poll, exit if no jobs"
+    print "  m2c watch --once             backward-compatible alias for --check"
+    print "  m2c key replace             replace the locally stored credential"
+    print "  m2c key remove              remove the locally stored credential"
+    print "  m2c uninstall               remove the installed command, state and m2c skill"
+    print "  m2c version                 show the installed version"
+    print "  m2c help                    show this help"
 }
 
 def read-codex-version [] {
@@ -994,13 +1160,21 @@ def watch-validate-packet [fm: record] {
             let branch = ($fm | get -o "branch" | default "")
             if ($branch == "main") or ($branch == "master") { {ok: false, reason: $"target branch cannot be main or master, got ($branch)"} } else if ($branch | is-empty) { {ok: false, reason: "branch field is required"} } else {
                 let model_str = ($fm | get -o "model" | default "")
-                    let model = (watch-parse-model $model_str)
-                    if ($model == null) { {ok: false, reason: $"invalid model ($model_str); must be standard or pro"} } else {
-                        let budget_result = (watch-parse-budget ($fm | get -o "budget_minutes" | default null))
-                        if (not $budget_result.ok) { $budget_result } else {
-                            {ok: true, base: $base, branch: $branch, model: $model, budget_minutes: $budget_result.budget}
+                let parsed_model = (if ($model_str | is-not-empty) { watch-parse-model $model_str } else { null })
+                let has_explicit_model = ($model_str | is-not-empty)
+                if $has_explicit_model and ($parsed_model == null) { {ok: false, reason: $"invalid model ($model_str); must be standard or pro"} } else {
+                    let worker_str = ($fm | get -o "worker" | default "mimo" | str trim)
+                    if ($worker_str != "mimo") { {ok: false, reason: $"unknown worker: ($worker_str); only mimo is supported"} } else {
+                        let profile = ($parsed_model | default "standard")
+                        let mode = ($fm | get -o "mode" | default "build" | str trim)
+                        if ($mode not-in ["build", "plan"]) { {ok: false, reason: $"invalid mode: ($mode); must be build or plan"} } else {
+                            let budget_result = (watch-parse-budget ($fm | get -o "budget_minutes" | default null))
+                            if (not $budget_result.ok) { $budget_result } else {
+                                {ok: true, base: $base, branch: $branch, worker: $worker_str, profile: $profile, mode: $mode, budget_minutes: $budget_result.budget}
+                            }
                         }
                     }
+                }
             }
         }
     }
@@ -1017,6 +1191,15 @@ def watch-gh-find-job [login: string] {
 def watch-parse-model [value: string] {
     let trimmed = ($value | str trim | str trim --char '"')
     if $trimmed in ["standard", "pro"] { $trimmed } else { null }
+}
+
+def watch-normalize-frontmatter [fm: record] {
+    let worker = ($fm | get -o "worker" | default "mimo" | str trim)
+    let model_str = ($fm | get -o "model" | default "")
+    let profile = (if ($model_str | is-not-empty) { watch-parse-model $model_str } else { null })
+    let profile_val = ($profile | default "standard")
+    let mode = ($fm | get -o "mode" | default "build" | str trim)
+    {worker: $worker, profile: $profile_val, mode: $mode}
 }
 
 def watch-parse-budget [value: any] {
@@ -1044,6 +1227,24 @@ def watch-gh-resolve-base [repo: string sha: string] {
     $result.exit_code == 0
 }
 
+def normalize-jobspec [fm: record repo: string number: int title: string owner: string] {
+    let validation = (watch-validate-packet $fm)
+    if not $validation.ok { error make {msg: $"invalid jobspec: ($validation.reason)"} }
+    {
+        repo: $repo
+        issue_number: $number
+        title: $title
+        owner: $owner
+        base_sha: $validation.base
+        branch: $validation.branch
+        worker: $validation.worker
+        profile: $validation.profile
+        mode: $validation.mode
+        budget_minutes: $validation.budget_minutes
+        description: ($fm | get -o "description" | default null)
+    }
+}
+
 def watch-admit-job [issue: record login: string] {
     let repo_full = (watch-issue-repo $issue)
     let body_result = (do { run-external "gh" "issue" "view" ($issue.number | into string) "--repo" $repo_full "--json" "body,author,state,title" } | complete)
@@ -1060,14 +1261,15 @@ def watch-admit-job [issue: record login: string] {
                         if $owner != $login { {ok: false, reason: $"repository owner ($owner) does not match authenticated user ($login)"} } else {
                             let fm = (watch-gh-parse-front-matter $detail.body)
                             if ($fm == null) { {ok: false, reason: "missing or malformed front matter (must start with ---)"} } else {
-                                let validation = (watch-validate-packet $fm)
-                                if (not $validation.ok) { $validation } else {
-                                    if not (watch-gh-resolve-base $repo_full $validation.base) { {ok: false, reason: $"base SHA ($validation.base) does not resolve in ($repo_full)"} } else {
+                                let jobspec_result = (try { {ok: true, value: (normalize-jobspec $fm $repo_full $issue.number $issue.title $owner)} } catch {|err| {ok: false, reason: ($err.msg? | default "invalid jobspec")} })
+                                if (not $jobspec_result.ok) { $jobspec_result } else {
+                                    let jobspec = $jobspec_result.value
+                                    if not (watch-gh-resolve-base $repo_full $jobspec.base_sha) { {ok: false, reason: $"base SHA ($jobspec.base_sha) does not resolve in ($repo_full)"} } else {
                                         let body_lines = ($detail.body | lines)
                                         let fm_end = ($body_lines | enumerate | where {|item| $item.item == "---"} | skip 1 | first)
                                         let packet = (if ($fm_end == null) { "" } else { $detail.body | lines | skip ($fm_end.index + 1) | str join "\n" | str trim })
                                         if ($packet | is-empty) { {ok: false, reason: "no worker packet after front matter"} } else {
-                                            {ok: true, base: $validation.base, branch: $validation.branch, model: $validation.model, budget_minutes: $validation.budget_minutes, packet: $packet, owner: $owner, repo: $repo_full, number: $issue.number, title: $issue.title, url: $issue.url}
+                                            {ok: true, jobspec: $jobspec, packet: $packet, url: $issue.url}
                                         }
                                     }
                                 }
@@ -1080,8 +1282,9 @@ def watch-admit-job [issue: record login: string] {
     }
 }
 
-def watch-claim-job [repo: string number: int] {
-    let result = (do { run-external "gh" "issue" "edit" ($number | into string) "--repo" $repo "--title" "[M2C RUNNING]" } | complete)
+def watch-claim-job [repo: string number: int original_title: string] {
+    let running_title = $"[M2C RUNNING] ($original_title)"
+    let result = (do { run-external "gh" "issue" "edit" ($number | into string) "--repo" $repo "--title" $running_title } | complete)
     $result.exit_code == 0
 }
 
@@ -1090,8 +1293,228 @@ def watch-update-title [repo: string number: int title: string] {
 }
 
 def watch-add-comment [repo: string number: int body: string] {
-    let result = (do { run-external "gh" "issue" "comment" ($number | into string) "--repo" $repo "--body" $body } | complete)
+    let tmp_file = ($nu.temp-dir | path join $"m2c-comment-(random uuid).md")
+    $body | save --force $tmp_file
+    let result = (do { run-external "gh" "issue" "comment" ($number | into string) "--repo" $repo "--body-file" $tmp_file } | complete)
+    do --ignore-errors { rm $tmp_file }
     $result.exit_code == 0
+}
+
+def controller-dispatch-worker [worker: string profile: string prompt: string workstream: any packet: any session_id: any quiet: bool agent: string fork: bool cwd: path budget_minutes: int] {
+    let test_backend = ($env.M2C_TEST_WORKER_BACKEND? | default "" | str trim)
+    if ($test_backend | is-not-empty) {
+        let result_path = ($test_backend | path expand)
+        if ($result_path | path exists) {
+            let result = (open --raw $result_path | from json)
+            {summary: $result}
+        } else {
+            error make {msg: $"test worker backend file not found: ($result_path)"}
+        }
+    } else {
+        worker-dispatch $worker $profile $prompt $workstream $packet $session_id $quiet $agent $fork $cwd $budget_minutes
+    }
+}
+
+def controller-runner [job_dir: path job: record packet: string] {
+    let test_repo_root = ($env.M2C_TEST_REPO_ROOT? | default "" | str trim)
+    let repo_url = (if ($test_repo_root | is-not-empty) {
+        $test_repo_root | path expand
+    } else {
+        $"https://github.com/($job.repo).git"
+    })
+    let clone_dir = ($job_dir | path join "repo")
+    let _ = (do { run-external "git" "clone" $repo_url $clone_dir } | complete)
+    let checkout = (do { run-external "git" "-C" $clone_dir "checkout" $job.base_sha } | complete)
+    if $checkout.exit_code != 0 {
+        flight-append-event $job.job_id {event: "runner_error", reason: $"failed to checkout base SHA ($job.base_sha)"}
+        let result_record = {
+            job_id: $job.job_id
+            repo: $job.repo
+            issue_number: $job.issue_number
+            title: $job.title
+            worker: $job.worker
+            profile: $job.profile
+            mode: $job.mode
+            budget_minutes: $job.budget_minutes
+            description: $job.description
+            category: "DELIVERY_FAILED"
+            failure_signature: "remote_missing"
+            duration_seconds: 0
+            exit_code: 1
+            local_branch: ""
+            local_sha: ""
+            worktree_clean: false
+            remote_exists: false
+            remote_sha: ""
+            sha_match: false
+            branch_match: false
+            changed_file_count: 0
+            tool_calls: 0
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+        }
+        flight-write-result $job.job_id $result_record
+        {exit_code: 1, timed_out: false, cancelled: false, result_record: $result_record}
+    } else {
+        let branch_create = (do { run-external "git" "-C" $clone_dir "checkout" "-b" $job.branch } | complete)
+        if $branch_create.exit_code != 0 {
+            let switch = (do { run-external "git" "-C" $clone_dir "checkout" $job.branch } | complete)
+            if $switch.exit_code != 0 {
+                flight-append-event $job.job_id {event: "runner_error", reason: $"failed to create or switch to branch ($job.branch)"}
+                let result_record = {
+                    job_id: $job.job_id
+                    repo: $job.repo
+                    issue_number: $job.issue_number
+                    title: $job.title
+                    worker: $job.worker
+                    profile: $job.profile
+                    mode: $job.mode
+                    budget_minutes: $job.budget_minutes
+                    description: $job.description
+                    category: "DELIVERY_FAILED"
+                    failure_signature: "branch_mismatch"
+                    duration_seconds: 0
+                    exit_code: 1
+                    local_branch: ""
+                    local_sha: ""
+                    worktree_clean: false
+                    remote_exists: false
+                    remote_sha: ""
+                    sha_match: false
+                    branch_match: false
+                    changed_file_count: 0
+                    tool_calls: 0
+                    tool_failures: 0
+                    completed_at: (iso-now-utc)
+                    closeout_ran: false
+                }
+                flight-write-result $job.job_id $result_record
+                {exit_code: 1, timed_out: false, cancelled: false, result_record: $result_record}
+            } else { controller-run-main $clone_dir $job $packet }
+        } else { controller-run-main $clone_dir $job $packet }
+    }
+}
+
+def controller-run-main [clone_dir: path job: record packet: string] {
+    let prompt = $"($packet)\n\nReturn a concise completion report with files changed, tests run and results, unresolved issues, and any evidence needed for verification."
+    let agent = (worker-agent $packet)
+    let budget = ($job.budget_minutes? | default 20)
+    let run = (controller-dispatch-worker $job.worker $job.profile $prompt null null null true $agent false $clone_dir $budget)
+    let summary = $run.summary
+    let delivery = (try {
+        watch-verify-delivery $clone_dir {branch: $job.branch, repo: $job.repo}
+    } catch {
+        {local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: false}
+    })
+    let changed_count = ($summary.changed_files? | default [] | length)
+    let delivery_with_count = ($delivery | insert changed_file_count $changed_count)
+    let final_status = (watch-classify-result $summary $delivery_with_count)
+    let failure_sig = (normalize-failure-signature $summary $delivery_with_count $final_status)
+    flight-append-event $job.job_id {event: "runner_complete", category: $final_status, failure_signature: $failure_sig}
+    let result_record = {
+        job_id: $job.job_id
+        repo: $job.repo
+        issue_number: $job.issue_number
+        title: $job.title
+        worker: $job.worker
+        profile: $job.profile
+        mode: $job.mode
+        budget_minutes: $job.budget_minutes
+        description: $job.description
+        category: $final_status
+        failure_signature: (if $final_status == "DONE" { null } else { $failure_sig })
+        duration_seconds: ($summary.duration_seconds? | default 0)
+        exit_code: ($summary.exit_code? | default 1)
+        local_branch: $delivery.local_branch
+        local_sha: $delivery.local_sha
+        worktree_clean: $delivery.worktree_clean
+        remote_exists: $delivery.remote_exists
+        remote_sha: $delivery.remote_sha
+        sha_match: $delivery.sha_match
+        branch_match: $delivery.branch_match
+        changed_file_count: $changed_count
+        tool_calls: ($summary.tool_calls? | default 0)
+        tool_failures: ($summary.tool_failures? | default 0)
+        completed_at: (iso-now-utc)
+        closeout_ran: false
+    }
+    flight-write-result $job.job_id $result_record
+    {exit_code: ($summary.exit_code? | default 0), timed_out: ($summary.timed_out? | default false), cancelled: ($summary.status == "cancelled"), result_record: $result_record}
+}
+
+def controller-closeout-runner [clone_dir: path job: record closeout_budget_minutes: int closeout_started_at: any] {
+    flight-append-event $job.job_id {event: "closeout_start", budget_minutes: $closeout_budget_minutes}
+    let prompt = "CLOSEOUT PHASE: Complete and push any coherent, clean, in-progress work. Do not discover or start new tasks. Push what is ready. If nothing is ready to push, exit cleanly."
+    let agent = "build"
+    let run = (controller-dispatch-worker $job.worker $job.profile $prompt null null null true $agent false $clone_dir $closeout_budget_minutes)
+    let summary = $run.summary
+    let closeout_ended = (date now)
+    let closeout_duration = (((($closeout_ended - $closeout_started_at) | into int) / 1000000000) | math round)
+    let delivery = (try {
+        watch-verify-delivery $clone_dir {branch: $job.branch, repo: $job.repo}
+    } catch {
+        {local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: false}
+    })
+    let changed_count = ($summary.changed_files? | default [] | length)
+    let delivery_with_count = ($delivery | insert changed_file_count $changed_count)
+    let final_status = (watch-classify-result $summary $delivery_with_count)
+    let failure_sig = (normalize-failure-signature $summary $delivery_with_count $final_status)
+    flight-append-event $job.job_id {event: "closeout_end", category: $final_status, duration_seconds: $closeout_duration}
+    flight-append-event $job.job_id {event: "runner_complete", category: $final_status, failure_signature: $failure_sig}
+    let result_record = {
+        job_id: $job.job_id
+        repo: $job.repo
+        issue_number: $job.issue_number
+        title: $job.title
+        worker: $job.worker
+        profile: $job.profile
+        mode: $job.mode
+        budget_minutes: $job.budget_minutes
+        description: $job.description
+        category: $final_status
+        failure_signature: (if $final_status == "DONE" { null } else { $failure_sig })
+        duration_seconds: ($summary.duration_seconds? | default 0)
+        exit_code: ($summary.exit_code? | default 1)
+        local_branch: $delivery.local_branch
+        local_sha: $delivery.local_sha
+        worktree_clean: $delivery.worktree_clean
+        remote_exists: $delivery.remote_exists
+        remote_sha: $delivery.remote_sha
+        sha_match: $delivery.sha_match
+        branch_match: $delivery.branch_match
+        changed_file_count: $changed_count
+        tool_calls: ($summary.tool_calls? | default 0)
+        tool_failures: ($summary.tool_failures? | default 0)
+        completed_at: (iso-now-utc)
+        closeout_ran: true
+        closeout_duration_seconds: $closeout_duration
+    }
+    flight-write-result $job.job_id $result_record
+    $result_record
+}
+
+def controller-finalize-job [job_record: record result_record: record] {
+    let final_status = $result_record.category
+    let final_title = $"[M2C ($final_status)] ($job_record.original_title)"
+    watch-update-title $job_record.jobspec.repo $job_record.jobspec.issue_number $final_title
+    let summary_status = (if ($result_record.timed_out? | default false) { "timed_out" } else if ($result_record.cancelled? | default false) { "cancelled" } else if ($result_record.exit_code == 0) { "completed" } else { "failed" })
+    let summary = {
+        status: $summary_status
+        exit_code: ($result_record.exit_code? | default 1)
+    }
+    let delivery = {
+        local_branch: ($result_record.local_branch? | default "")
+        local_sha: ($result_record.local_sha? | default "")
+        worktree_clean: ($result_record.worktree_clean? | default false)
+        remote_exists: ($result_record.remote_exists? | default false)
+        remote_sha: ($result_record.remote_sha? | default "")
+        sha_match: ($result_record.sha_match? | default false)
+        branch_match: ($result_record.branch_match? | default false)
+    }
+    let comment = (watch-build-result-comment $summary $delivery $job_record.jobspec.profile $final_status $job_record.jobspec.budget_minutes)
+    watch-add-comment $job_record.jobspec.repo $job_record.jobspec.issue_number $comment
+    flight-append-event $job_record.job_id {event: "finalized", category: $final_status, failure_signature: ($result_record.failure_signature? | default null)}
 }
 
 def watch-run-worker-in-job [job_dir: path job: record] {
@@ -1105,11 +1528,10 @@ def watch-run-worker-in-job [job_dir: path job: record] {
         let switch = (do { run-external "git" "-C" $clone_dir "checkout" $job.branch } | complete)
         if $switch.exit_code != 0 { error make {msg: $"failed to create or switch to branch ($job.branch)"} }
     }
-    let model_id = (if $job.model == "standard" { (provider-data).models.standard } else { (provider-data).models.pro })
     let prompt = $"($job.packet)\n\nReturn a concise completion report with files changed, tests run and results, unresolved issues, and any evidence needed for verification."
     let agent = (worker-agent $job.packet)
     let budget = ($job.budget_minutes? | default 20)
-    let run = (worker-run $model_id $prompt null null null true $agent false $clone_dir $budget)
+    let run = (controller-dispatch-worker $job.worker $job.profile $prompt null null null true $agent false $clone_dir $budget)
     {summary: $run.summary, clone_dir: $clone_dir}
 }
 
@@ -1131,6 +1553,7 @@ def watch-verify-delivery [clone_dir: path job: record] {
     } catch { "" })
     let sha_match = ($remote_sha != "") and ($local_sha == $remote_sha)
     let branch_match = ($local_branch == $job.branch)
+    let pr_info = (if $remote_exists { watch-find-pr $job.repo $job.branch } else { null })
     {
         local_branch: $local_branch
         local_sha: $local_sha
@@ -1139,6 +1562,16 @@ def watch-verify-delivery [clone_dir: path job: record] {
         remote_sha: $remote_sha
         sha_match: $sha_match
         branch_match: $branch_match
+        pr_number: ($pr_info.number? | default null)
+        pr_url: ($pr_info.url? | default null)
+    }
+}
+
+def watch-find-pr [repo: string branch: string] {
+    let result = (do { run-external "gh" "pr" "list" "--repo" $repo "--head" $branch "--json" "number,url,state" "--limit" "1" } | complete)
+    if $result.exit_code != 0 { null } else {
+        let prs = (try { $result.stdout | from json } catch { [] })
+        if ($prs | is-empty) { null } else { $prs | first }
     }
 }
 
@@ -1153,7 +1586,11 @@ def watch-build-result-comment [summary: record delivery: record model: string f
         (if (not $delivery.worktree_clean) { "worktree is dirty" } else { "" })
         (if (not $delivery.remote_exists) { $"remote branch ($delivery.local_branch) does not exist" } else { "" })
         (if (not $delivery.sha_match) and $delivery.remote_exists { $"remote SHA ($delivery.remote_sha) != local SHA ($delivery.local_sha)" } else { "" })
-        (if $summary.status != "completed" { $"worker status: ($summary.status)" } else { "" })
+        (if $summary.status == "timed_out" { "watchdog terminated the worker" } else { "" })
+        (if $summary.status == "cancelled" { "worker was cancelled" } else { "" })
+        (if ($summary.status == "completed") and (not $delivery.worktree_clean) { "worker completed but worktree is dirty" } else { "" })
+        (if ($summary.status == "completed") and (not $delivery.remote_exists) { "worker completed but no remote branch was pushed" } else { "" })
+        (if $summary.status == "failed" { $"worker exit code: ($exit_code)" } else { "" })
     ] | where {|r| ($r | is-not-empty)}
     let reason_line = (if (($reasons | length) > 0) { $"Reasons: ($reasons | str join "; ")" } else { "" })
     [
@@ -1166,6 +1603,7 @@ def watch-build-result-comment [summary: record delivery: record model: string f
         $"exit: ($exit_code)"
         $"worktree: ($worktree_status)"
         $"remote: ($remote_status)"
+        (if ($delivery.pr_url? | default null) != null { $"pr: ($delivery.pr_url)" } else { "" })
         ""
         $reason_line
     ] | where {|line| ($line | is-not-empty)} | str join "\n"
@@ -1175,67 +1613,463 @@ def watch-exit-for [summary: record] {
     if ($summary.status == "completed") { 0 } else { 1 }
 }
 
+def watch-classify-result [summary: record delivery: record] {
+    if ($summary.status == "completed") and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match and $delivery.branch_match { "DONE" } else if ($summary.status == "timed_out") and $delivery.remote_exists and $delivery.sha_match { "PARTIAL" } else if ($summary.status == "cancelled") and $delivery.remote_exists and $delivery.sha_match { "PARTIAL" } else if ($summary.status == "timed_out") { "TIMED_OUT" } else if ($summary.status == "cancelled") { "TIMED_OUT" } else if ($summary.status == "failed") and (not $delivery.branch_match) { "DELIVERY_FAILED" } else if ($summary.status == "failed") and (not $delivery.worktree_clean) { "DELIVERY_FAILED" } else if ($summary.status == "failed") and (not $delivery.remote_exists) { "DELIVERY_FAILED" } else if ($summary.status == "failed") and (not $delivery.sha_match) { "DELIVERY_FAILED" } else if ($summary.status == "failed") { "WORKER_FAILED" } else if ($summary.status == "completed") and (($delivery.changed_file_count? | default 0) == 0) and (not $delivery.remote_exists) { "NO_CHANGES" } else { "DELIVERY_FAILED" }
+}
+
+def watch-exit-for-category [category: string] {
+    if $category == "DONE" { 0 } else { 1 }
+}
+
+def watch-parse-jobs [args: list<string>] {
+    let jobs_idx = ($args | enumerate | where item == "--jobs" | first | get index? | default null)
+    if ($jobs_idx == null) { 1 } else {
+        let val_idx = ($jobs_idx + 1)
+        if $val_idx >= ($args | length) { error make {msg: "--jobs requires a number (1-3)"} }
+        let val = ($args | get $val_idx | into int)
+        if $val < 1 or $val > 3 { error make {msg: "--jobs must be between 1 and 3"} }
+        $val
+    }
+}
+
+def watch-slot-acquire [active_slots: list<string> resource_key: string max_slots: int] {
+    if ($active_slots | length) >= $max_slots { {ok: false, reason: "all slots occupied"} } else if ($active_slots | any {|slot| $slot == $resource_key}) { {ok: false, reason: "resource key already active"} } else { {ok: true} }
+}
+
 def watch-command [args: list<string>] {
+    let stay = ($args | any {|arg| $arg == "--stay"})
+    let check = ($args | any {|arg| $arg == "--check"})
     let once = ($args | any {|arg| $arg == "--once"})
-    let login = (watch-gh-login)
-    print $"Watching as ($login). Polling every 12 seconds."
-    mut running = false
+    let max_slots = (watch-parse-jobs $args)
+    if ($max_slots > 1) and (not $stay) {
+        print "--jobs requires --stay"
+        return
+    }
+    let lock = (controller-acquire-lock)
+    if (not $lock.ok) { print $lock.reason; return }
+    controller-write-lock $max_slots
+    let login = (try { watch-gh-login } catch {|err| controller-release-lock; error make {msg: ($err.msg? | default "gh auth failed")}})
+    print $"(startup-identity) · watcher"
+    print $"Watching as ($login). Slots: ($max_slots). Polling every 12 seconds."
+    mut active_jobs = []
     mut iterations = 0
-    while true {
-        $iterations = $iterations + 1
-        if (not $running) {
-            let jobs = (watch-gh-find-job $login)
-            if (($jobs | length) > 0) {
-                let job = ($jobs | first)
-                let admission = (watch-admit-job $job $login)
-                if $admission.ok {
-                    print $"Claiming job: ($job.title)"
-                    if (watch-claim-job $admission.repo $admission.number) {
-                        $running = true
-                        let job_id = (worker-job-id)
-                        let job_dir = (job-root | path join $"watch-($job_id)")
-                        mkdir $job_dir
-                        print $"Job dir: ($job_dir)"
-                        print $"Base: ($admission.base)"
-                        print $"Branch: ($admission.branch)"
-                        print $"Model: ($admission.model)"
-                        print $"Budget: ($admission.budget_minutes)m"
-                        let run_result = (try {
-                            watch-run-worker-in-job $job_dir $admission
-                        } catch {|err|
-                            {summary: {status: "failed", exit_code: 1, final_text: ($err.msg? | default "worker error")}, clone_dir: null}
-                        })
-                        let delivery = (if ($run_result.clone_dir != null) {
-                            watch-verify-delivery $run_result.clone_dir $admission
+    try {
+        while true {
+            $iterations = $iterations + 1
+            let available_slots = ($max_slots - ($active_jobs | length))
+            if $available_slots > 0 {
+                let jobs = (watch-gh-find-job $login)
+                for job in ($jobs | first $available_slots) {
+                    let admission = (watch-admit-job $job $login)
+                    if $admission.ok {
+                        let jobspec = $admission.jobspec
+                        let resource_key = $"($jobspec.repo):($jobspec.branch)"
+                        let slot_check = (watch-slot-acquire ($active_jobs | each {|j| $j.resource_key}) $resource_key $max_slots)
+                        if $slot_check.ok {
+                            let original_title = ($jobspec.title | str replace --regex '^\[M2C QUEUED\]\s*' '' | str trim)
+                            print $"Claiming job: ($original_title)"
+                            if (watch-claim-job $jobspec.repo $jobspec.issue_number $original_title) {
+                                let job_id = (worker-job-id)
+                                let job_dir = (job-root | path join $"watch-($job_id)")
+                                mkdir $job_dir
+                                let manifest = {
+                                    job_id: $job_id
+                                    repo: $jobspec.repo
+                                    issue_number: $jobspec.issue_number
+                                    title: $original_title
+                                    base_sha: $jobspec.base_sha
+                                    branch: $jobspec.branch
+                                    worker: $jobspec.worker
+                                    profile: $jobspec.profile
+                                    mode: $jobspec.mode
+                                    budget_minutes: $jobspec.budget_minutes
+                                    description: $jobspec.description
+                                    resource_key: $resource_key
+                                    claimed_at: (iso-now-utc)
+                                    m2c_version: (version-value)
+                                    m2c_source_hash: (source-hash-short)
+                                }
+                                flight-write-manifest $job_id $manifest
+                                flight-append-event $job_id {event: "claimed", repo: $jobspec.repo, issue: $jobspec.issue_number}
+                                print $"Job dir: ($job_dir)"
+                                print $"Base: ($jobspec.base_sha)"
+                                print $"Branch: ($jobspec.branch)"
+                                print $"Worker: ($jobspec.worker)"
+                                print $"Profile: ($jobspec.profile)"
+                                print $"Budget: ($jobspec.budget_minutes)m"
+                                flight-append-event $job_id {event: "runner_start"}
+                                let child_tag = (worker-mailbox-tag)
+                                let packet = $admission.packet
+                                let child_job = (job spawn --description $"m2c runner ($jobspec.repo):($jobspec.branch)" {
+                                    let _runner_result = (controller-runner $job_dir $jobspec $packet)
+                                    {done: true} | job send 0 --tag $child_tag
+                                })
+                                print $"Child runner started: ($child_job)"
+                                let runner_record = {
+                                    job_id: $job_id
+                                    job_dir: $job_dir
+                                    jobspec: $jobspec
+                                    resource_key: $resource_key
+                                    original_title: $original_title
+                                    admission: $admission
+                                    started_at: (date now)
+                                    soft_deadline_ns: (soft-deadline-ns $jobspec.budget_minutes)
+                                    hard_deadline_ns: (watchdog-limit-from-budget $jobspec.budget_minutes)
+                                    closeout_started: false
+                                    child_job: $child_job
+                                    child_tag: $child_tag
+                                }
+                                $active_jobs = ($active_jobs | append $runner_record)
+                            } else {
+                                print "Failed to claim job."
+                            }
                         } else {
-                            {local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: false}
-                        })
-                        let can_be_done = ($run_result.summary.status == "completed") and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match and $delivery.branch_match
-                        let final_status = (if $can_be_done { "DONE" } else { "FAILED" })
-                        let final_title = $"[M2C ($final_status)]"
-                        watch-update-title $admission.repo $admission.number $final_title
-                        let comment = (watch-build-result-comment $run_result.summary $delivery $admission.model $final_status $admission.budget_minutes)
-                        watch-add-comment $admission.repo $admission.number $comment
-                        print $"Job ($final_status). Title: ($final_title)"
-                        $running = false
+                            print $"Skipping ($jobspec.repo):($jobspec.branch) - ($slot_check.reason)"
+                        }
                     } else {
-                        print "Failed to claim job."
-                        $running = false
+                        print $"Job rejected: ($admission.reason)"
+                        let blocked_repo = (watch-issue-repo $job)
+                        let original_title = ($job.title | str replace --regex '^\[M2C QUEUED\]\s*' '' | str trim)
+                        watch-update-title $blocked_repo $job.number $"[M2C BLOCKED] ($original_title)"
+                        watch-add-comment $blocked_repo $job.number $"Rejection reason: ($admission.reason)"
                     }
-                } else {
-                    print $"Job rejected: ($admission.reason)"
-                    let blocked_repo = (watch-issue-repo $job)
-                    watch-update-title $blocked_repo $job.number "[M2C BLOCKED]"
-                    watch-add-comment $blocked_repo $job.number $"Rejection reason: ($admission.reason)"
                 }
             }
+            mut completed_indices = []
+            let num_active = ($active_jobs | length)
+            mut idx = 0
+            while $idx < $num_active {
+                let job_record = ($active_jobs | get $idx)
+                let result_path = (flight-job-dir $job_record.job_id | path join "result.json")
+                let result_exists = ($result_path | path exists)
+                let elapsed_ns = (((date now) - $job_record.started_at) | into int)
+                if $result_exists {
+                    let child_msg = (try { job recv --tag $job_record.child_tag --timeout 0sec } catch { null })
+                    if ($child_msg != null) {
+                        let result_record = (flight-read-result $job_record.job_id)
+                        if ($result_record != null) {
+                            controller-finalize-job $job_record $result_record
+                            let duration_str = (human-duration ($result_record.duration_seconds? | default 0))
+                            let local_sha_short = (($result_record.local_sha? | default "") | str substring 0..7)
+                            let receipt_parts = [
+                                ($result_record.category? | default "?")
+                                $job_record.original_title
+                                $job_record.jobspec.repo
+                                $"($job_record.jobspec.worker)/($job_record.jobspec.profile)"
+                                $duration_str
+                                $"($result_record.changed_file_count? | default 0) files"
+                                (if ($result_record.local_sha? | default "" | is-not-empty) { $local_sha_short } else { "" })
+                                (if ($result_record.remote_exists? | default false) { "remote ok" } else { "no remote branch" })
+                                (if ($result_record.closeout_ran? | default false) { "closeout ran" } else { "" })
+                                (if ($result_record.failure_signature? | default null | is-not-empty) and ($result_record.category? | default "") != "DONE" { $result_record.failure_signature } else { "" })
+                            ] | where {|p| ($p | is-not-empty)}
+                            print ($receipt_parts | str join " · ")
+                            $completed_indices = ($completed_indices | append $idx)
+                        }
+                    }
+                } else if (not $job_record.closeout_started) and ($elapsed_ns >= $job_record.soft_deadline_ns) {
+                    let remaining_ns = ($job_record.hard_deadline_ns - $elapsed_ns)
+                    let remaining_minutes = (if $remaining_ns > 0 { (($remaining_ns / 1000000000) / 60) | math round | into int } else { 1 })
+                    let closeout_budget = ([1 $remaining_minutes] | math max)
+                    print $"Soft deadline hit for ($job_record.original_title). Killing runner and starting closeout (budget: ($closeout_budget)m)."
+                    flight-append-event $job_record.job_id {event: "soft_deadline_hit", closeout_budget_minutes: $closeout_budget}
+                    try { job kill $job_record.child_job } catch { }
+                    let clone_dir = ($job_record.job_dir | path join "repo")
+                    let closeout_jobspec = $job_record.jobspec
+                    let closeout_tag = (worker-mailbox-tag)
+                    let closeout_child = (job spawn --description $"m2c closeout ($closeout_jobspec.repo):($closeout_jobspec.branch)" {
+                        let _closeout_result = (controller-closeout-runner $clone_dir $closeout_jobspec $closeout_budget (date now))
+                        {done: true} | job send 0 --tag $closeout_tag
+                    })
+                    let target_idx = $idx
+                    $active_jobs = ($active_jobs | enumerate | each {|row|
+                        if $row.index == $target_idx {
+                            $row.item | merge {closeout_started: true, child_job: $closeout_child, child_tag: $closeout_tag}
+                        } else { $row.item }
+                    })
+                } else if ($elapsed_ns >= $job_record.hard_deadline_ns) {
+                    print $"Hard deadline hit for ($job_record.original_title). Forcing completion."
+                    flight-append-event $job_record.job_id {event: "hard_deadline_hit"}
+                    try { job kill $job_record.child_job } catch { }
+                    if (not (flight-job-dir $job_record.job_id | path join "result.json" | path exists)) {
+                        let result_record = {
+                            job_id: $job_record.job_id
+                            repo: $job_record.jobspec.repo
+                            issue_number: $job_record.jobspec.issue_number
+                            title: $job_record.original_title
+                            worker: $job_record.jobspec.worker
+                            profile: $job_record.jobspec.profile
+                            mode: $job_record.jobspec.mode
+                            budget_minutes: $job_record.jobspec.budget_minutes
+                            description: $job_record.jobspec.description
+                            category: "TIMED_OUT"
+                            failure_signature: "watchdog_timeout"
+                            duration_seconds: (($elapsed_ns / 1000000000) | math round | into int)
+                            exit_code: 124
+                            timed_out: true
+                            local_branch: ""
+                            local_sha: ""
+                            worktree_clean: false
+                            remote_exists: false
+                            remote_sha: ""
+                            sha_match: false
+                            branch_match: false
+                            changed_file_count: 0
+                            tool_calls: 0
+                            tool_failures: 0
+                            completed_at: (iso-now-utc)
+                            closeout_ran: false
+                        }
+                        flight-write-result $job_record.job_id $result_record
+                        controller-finalize-job $job_record $result_record
+                    }
+                    $completed_indices = ($completed_indices | append $idx)
+                }
+                $idx = $idx + 1
+            }
+            if ($completed_indices | length) > 0 {
+                $active_jobs = ($active_jobs | enumerate | where {|row| not ($row.index in $completed_indices)} | get item)
+            }
+            if ($once or $check) and ($active_jobs | is-empty) { break }
+            if (not $stay) and ($active_jobs | is-empty) { break }
+            if ($active_jobs | is-empty) {
+                try { sleep 12sec } catch { break }
+            } else {
+                try { sleep 1sec } catch { break }
+            }
         }
-        if $once { break }
-        if (not $running) {
-            try { sleep 12sec } catch { break }
+    } catch {|err|
+        controller-release-lock
+        error make {msg: ($err.msg? | default "watch error")}
+    }
+    controller-release-lock
+    print "Watch stopped."
+}
+
+def status-command [] {
+    print $"(startup-identity)"
+    let jobs = (flight-list-jobs)
+    let recent = ($jobs | last 5)
+    if ($recent | is-empty) { print "No jobs recorded." } else {
+        let rows = ($recent | each {|job_id|
+            let result = (flight-read-result $job_id)
+            let manifest = (flight-read-manifest $job_id)
+            if ($result != null) {
+                let dur = (human-duration ($result.duration_seconds? | default 0))
+                {job: $job_id, repo: ($result.repo? | default "?"), profile: ($result.profile? | default "?"), category: ($result.category? | default "?"), duration: $dur, files: ($result.changed_file_count? | default 0)}
+            } else if ($manifest != null) { {job: $job_id, repo: ($manifest.repo? | default "?"), profile: ($manifest.profile? | default "?"), category: "RUNNING", duration: "-", files: "-"} } else { {job: $job_id, repo: "?", profile: "?", category: "UNKNOWN", duration: "-", files: "-"} }
+        })
+        print $"Recent jobs (showing ($recent | length) of ($jobs | length) total):"
+        print ($rows | table)
+    }
+    let all_results = ($jobs | each {|job_id| flight-read-result $job_id } | where {|r| $r != null})
+    if ($all_results | is-not-empty) {
+        let categories = ($all_results | get category | reduce -f {} {|cat, acc| $acc | upsert $cat (($acc | get -o $cat | default 0) + 1) })
+        let total = ($all_results | length)
+        let success = ($categories | get -o "DONE" | default 0)
+        let rate = (if $total > 0 { (($success | into float) / ($total | into float) * 100.0) | math round --precision 1 } else { 0.0 })
+        print ""
+        print $"Total: ($total) · Success: ($rate)%"
+        print $"Categories: ($categories | to json -r)"
+    }
+}
+
+def inspect-command [args: list<string>] {
+    let job_id = ($args | first | default "")
+    if ($job_id | is-empty) { error make {msg: "m2c inspect requires a job-id"} }
+    let manifest = (flight-read-manifest $job_id)
+    if ($manifest == null) { error make {msg: $"No manifest found for job ($job_id)"} }
+    print $"Job: ($job_id)"
+    print $"Repo: ($manifest.repo? | default "?")"
+    print $"Title: ($manifest.title? | default "?")"
+    print $"Worker: ($manifest.worker? | default "?") / ($manifest.profile? | default "?")"
+    print $"Base: ($manifest.base_sha? | default "?")"
+    print $"Branch: ($manifest.branch? | default "?")"
+    print $"Budget: ($manifest.budget_minutes? | default 20)m"
+    print ""
+    let events = (flight-read-events $job_id)
+    if ($events | is-not-empty) {
+        print "Timeline:"
+        for event in $events {
+            let ts = ($event.timestamp? | default "?" | str substring 0..18)
+            let ev = ($event.event? | default "?")
+            let extra = ($event | reject event timestamp | transpose key value | each {|row| $"($row.key)=($row.value)"} | str join " ")
+            print $"  ($ts) ($ev) (if ($extra | is-not-empty) { $extra } else { "" })"
         }
     }
-    print "Watch stopped."
+    let result = (flight-read-result $job_id)
+    if ($result != null) {
+        print ""
+        print $"Result: ($result.category? | default "?")"
+        print $"Duration: (human-duration ($result.duration_seconds? | default 0))"
+        print $"Exit code: ($result.exit_code? | default "?")"
+        print $"Files changed: ($result.changed_file_count? | default 0)"
+        if ($result.failure_signature? | default null | is-not-empty) { print $"Failure: ($result.failure_signature)" }
+        print $"SHA: ($result.local_sha? | default "?")"
+        print $"Branch match: ($result.branch_match? | default false)"
+        print $"Remote exists: ($result.remote_exists? | default false)"
+        print $"SHA match: ($result.sha_match? | default false)"
+        print $"Worktree clean: ($result.worktree_clean? | default false)"
+    }
+}
+
+def queue-command [] {
+    print $"(startup-identity)"
+    let gh_available = (watch-gh-available)
+    if (not $gh_available) {
+        print "GitHub CLI (gh) not available or not authenticated."
+        print "Run: gh auth login"
+        return
+    }
+    let login = (try { watch-gh-login } catch { null })
+    if ($login == null) {
+        print "GitHub authentication failed. Run: gh auth login"
+        return
+    }
+    let issues = (watch-gh-find-job $login)
+    if ($issues | is-empty) {
+        print "No queued jobs found on GitHub."
+    } else {
+        let rows = ($issues | each {|issue|
+            let repo_full = (watch-issue-repo $issue)
+            let body_result = (do { run-external "gh" "issue" "view" ($issue.number | into string) "--repo" $repo_full "--json" "body" } | complete)
+            let fm = (if $body_result.exit_code == 0 {
+                let detail = (try { $body_result.stdout | from json } catch { null })
+                if ($detail != null) { watch-gh-parse-front-matter ($detail.body? | default "") } else { null }
+            } else { null })
+            let profile = (if ($fm != null) { watch-normalize-frontmatter $fm | get profile } else { "?" })
+            let worker = (if ($fm != null) { watch-normalize-frontmatter $fm | get worker } else { "?" })
+            let branch = (if ($fm != null) { ($fm | get -o "branch" | default "?") } else { "?" })
+            let resource_key = $"($repo_full):($branch)"
+            let active_count = (controller-running-jobs | where {|m| ($m.resource_key? | default "") == $resource_key} | length)
+            let resource_blocked = ($active_count > 0)
+            {
+                repo: $repo_full
+                issue: $issue.number
+                title: ($issue.title | str replace --regex '^\[M2C QUEUED\]\s*' '' | str trim)
+                worker: $worker
+                profile: $profile
+                resource_blocked: (if $resource_blocked { "yes" } else { "no" })
+            }
+        })
+        print $"Queued GitHub jobs: ($rows | length)"
+        print ($rows | table)
+    }
+}
+
+def stats-command [args: list<string>] {
+    print $"(startup-identity)"
+    let recent_idx = ($args | enumerate | where item == "--recent" | first | get index? | default null)
+    let limit = (if ($recent_idx != null) {
+        let val_idx = ($recent_idx + 1)
+        if $val_idx >= ($args | length) { 20 } else { $args | get $val_idx | into int }
+    } else { 100 })
+    let jobs = (flight-list-jobs)
+    let results = ($jobs | each {|job_id| flight-read-result $job_id } | where {|r| $r != null} | last $limit)
+    if ($results | is-empty) { print "No completed jobs." } else {
+        let categories = ($results | get category | reduce -f {} {|cat, acc| $acc | upsert $cat (($acc | get -o $cat | default 0) + 1) })
+        let total = ($results | length)
+        let success = ($categories | get -o "DONE" | default 0)
+        let partial = ($categories | get -o "PARTIAL" | default 0)
+        let failed = ($total - $success - $partial)
+        let success_rate = (if $total > 0 { (($success | into float) / ($total | into float) * 100.0) | math round --precision 1 } else { 0.0 })
+        let done_partial_rate = (if $total > 0 { ((($success + $partial) | into float) / ($total | into float) * 100.0) | math round --precision 1 } else { 0.0 })
+        let avg_duration = (if $total > 0 { ($results | get duration_seconds | math avg | math round | into int) } else { 0 })
+        let total_files = ($results | get changed_file_count | math sum)
+        print $"Jobs analyzed: ($total)"
+        print $"Success (DONE): ($success)"
+        print $"Partial: ($partial)"
+        print $"Failed: ($failed)"
+        print $"Success rate (DONE only): ($success_rate)%"
+        print $"Success+Partial rate: ($done_partial_rate)%"
+        print $"Avg duration: (human-duration $avg_duration)"
+        print $"Total files changed: ($total_files)"
+        print ""
+        print "Categories:"
+        for cat in ($categories | columns | sort) {
+            let count = ($categories | get $cat)
+            print $"  ($cat | fill -a left -w 20) ($count)"
+        }
+        let failure_sigs = ($results | where {|r| ($r.failure_signature? | default null) != null} | get failure_signature | reduce -f {} {|sig, acc| $acc | upsert $sig (($acc | get -o $sig | default 0) + 1) })
+        if ($failure_sigs | is-not-empty) {
+            print ""
+            print "Failure signatures:"
+            for sig in ($failure_sigs | columns | sort) {
+                let count = ($failure_sigs | get $sig)
+                print $"  ($sig | fill -a left -w 25) ($count)"
+            }
+        }
+    }
+}
+
+def failures-command [] {
+    print $"(startup-identity)"
+    let jobs = (flight-list-jobs)
+    let all_results = ($jobs | each {|job_id| flight-read-result $job_id } | where {|r| $r != null})
+    let failed = ($all_results | where {|r| ($r.category? | default "") not-in ["DONE", "PARTIAL"]})
+    let partial = ($all_results | where {|r| ($r.category? | default "") == "PARTIAL"})
+    let done = ($all_results | where {|r| ($r.category? | default "") == "DONE"})
+    if ($all_results | is-empty) { print "No completed jobs." } else {
+        print $"Total completed: ($all_results | length)"
+        print $"  DONE: ($done | length)"
+        print $"  PARTIAL: ($partial | length)"
+        print $"  Failed: ($failed | length)"
+        if ($failed | is-not-empty) {
+            let sig_counts = ($failed | get failure_signature | each {|sig| if ($sig == null) { "unknown" } else { $sig } } | reduce -f {} {|sig, acc| $acc | upsert $sig (($acc | get -o $sig | default 0) + 1) })
+            print ""
+            print "Failure signatures:"
+            for sig in ($sig_counts | columns | sort) {
+                let count = ($sig_counts | get $sig)
+                print $"  ($sig | fill -a left -w 25) ($count)"
+            }
+        }
+        if ($partial | is-not-empty) {
+            print ""
+            print $"PARTIAL completions: ($partial | length)"
+            for r in ($partial | last 5) {
+                let dur = (human-duration ($r.duration_seconds? | default 0))
+                print $"  ($r.repo? | default "?") · ($r.profile? | default "?") · ($dur)"
+            }
+        }
+    }
+}
+
+def doctor-recent-command [] {
+    doctor []
+    print ""
+    print "Recent health (flight recorder):"
+    let jobs = (flight-list-jobs)
+    let recent = ($jobs | last 10)
+    if ($recent | is-empty) { print "  No recent jobs." } else {
+        let results = ($recent | each {|job_id| flight-read-result $job_id } | where {|r| $r != null})
+        if ($results | is-empty) { print "  No completed jobs in recent window." } else {
+            let done = ($results | where category == "DONE" | length)
+            let partial = ($results | where category == "PARTIAL" | length)
+            let internal_error = ($results | where failure_signature == "process_sigkill" | length)
+            let delivery_failed = ($results | where failure_signature == "remote_missing" | length)
+            let worker_failed = ($results | where failure_signature == "worker_exit_nonzero" | length)
+            let timed_out = ($results | where failure_signature == "watchdog_timeout" | length)
+            let dirty_worktree = ($results | where failure_signature == "dirty_worktree" | length)
+            let branch_mismatch = ($results | where failure_signature == "branch_mismatch" | length)
+            let total_results = ($results | length)
+            let failed_count = ($total_results - $done - $partial)
+            print $"  DONE: ($done) · PARTIAL: ($partial) · Failed: ($failed_count)"
+            print ""
+            print "  Failure signatures (recent window):"
+            if $internal_error > 0 { print $"    INTERNAL_ERROR (process_sigkill)   ($internal_error)" }
+            if $delivery_failed > 0 { print $"    DELIVERY_FAILED (remote_missing)   ($delivery_failed)" }
+            if $worker_failed > 0 { print $"    WORKER_FAILED (exit_nonzero)       ($worker_failed)" }
+            if $timed_out > 0 { print $"    TIMED_OUT (watchdog_timeout)       ($timed_out)" }
+            if $dirty_worktree > 0 { print $"    DELIVERY_FAILED (dirty_worktree)   ($dirty_worktree)" }
+            if $branch_mismatch > 0 { print $"    DELIVERY_FAILED (branch_mismatch)  ($branch_mismatch)" }
+            let clean_recent = ($recent | each {|job_id|
+                let manifest = (flight-read-manifest $job_id)
+                let result = (flight-read-result $job_id)
+                if ($manifest != null) and ($result == null) { $manifest } else { null }
+            } | where {|m| $m != null})
+            if ($clean_recent | is-not-empty) { print $"  Running (no result yet): ($clean_recent | length)" }
+        }
+    }
 }
 
 def uninstall [] {
@@ -1254,7 +2088,7 @@ export def version [] { print (version-value) }
 
 export def invoke [...args: string] {
     let command = ($args | first | default "")
-    if $command in ["help", "--help", "-h"] { print-help } else if $command == "version" { version } else if $command == "models" { model-records | table } else if $command == "setup" { setup } else if $command == "doctor" { doctor ($args | skip 1) } else if $command == "key" { key-command ($args | skip 1) } else if $command == "checkpoint" { checkpoint-command ($args | skip 1) } else if $command == "watch" { watch-command ($args | skip 1) } else if $command == "uninstall" { uninstall } else if $command == "codex" {
+    if $command in ["help", "--help", "-h"] { print-help } else if $command == "version" { version } else if $command == "models" { model-records | table } else if $command == "setup" { setup } else if $command == "doctor" { doctor ($args | skip 1) } else if $command == "key" { key-command ($args | skip 1) } else if $command == "checkpoint" { checkpoint-command ($args | skip 1) } else if $command == "watch" { watch-command ($args | skip 1) } else if $command == "status" { status-command } else if $command == "queue" { queue-command } else if $command == "stats" { stats-command ($args | skip 1) } else if $command == "failures" { failures-command } else if $command == "inspect" { inspect-command ($args | skip 1) } else if $command == "uninstall" { uninstall } else if $command == "codex" {
         let rest = ($args | skip 1)
         let selected = ($rest | first | default "pro")
         if $selected == "standard" { launch-codex (provider-data).models.standard ($rest | skip 1) } else if $selected == "pro" { launch-codex (provider-data).models.pro ($rest | skip 1) } else { launch-codex (provider-data).models.pro $rest }
