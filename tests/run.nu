@@ -3357,6 +3357,539 @@ let results = [
         assert-equal $prep.branch "mimo/shape" "branch value correct"
         assert-equal $prep.declared_base_sha $base_sha "declared_base_sha value correct"
     })
+    # === fix soft-deadline closeout result race (phase ownership) ===
+    (test "controller-result-authoritative: main result is authoritative before closeout" {
+        let main_result = {phase: "main", generation: 0, category: "DONE"}
+        assert (controller-result-authoritative $main_result false) "main result finalizes when closeout not started"
+    })
+    (test "controller-result-authoritative: main result is NOT authoritative after closeout starts" {
+        let main_result = {phase: "main", generation: 0, category: "PARTIAL"}
+        assert (not (controller-result-authoritative $main_result true)) "main result superseded when closeout started"
+    })
+    (test "controller-result-authoritative: closeout result is authoritative after closeout starts" {
+        let closeout_result = {phase: "closeout", generation: 1, category: "DONE"}
+        assert (controller-result-authoritative $closeout_result true) "closeout result finalizes when closeout started"
+    })
+    (test "controller-result-authoritative: null result is never authoritative" {
+        assert (not (controller-result-authoritative null false)) "null result not authoritative before closeout"
+        assert (not (controller-result-authoritative null true)) "null result not authoritative after closeout"
+    })
+    (test "controller-result-authoritative: result without phase field defaults to main" {
+        let legacy_result = {category: "DONE", closeout_ran: false}
+        assert (controller-result-authoritative $legacy_result false) "legacy result authoritative before closeout"
+        assert (not (controller-result-authoritative $legacy_result true)) "legacy result not authoritative after closeout"
+    })
+    (test "controller-result-authoritative: generation 1 result is authoritative regardless of phase" {
+        let gen1 = {phase: "main", generation: 1, category: "DONE"}
+        assert (controller-result-authoritative $gen1 true) "generation 1 is authoritative even with main phase"
+    })
+    (test "controller-run-main writes phase main and generation 0" {
+        let fake_repo = ($test_root | path join "phase-main-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "phase-main-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let test_result = {status: "completed", exit_code: 0, tool_calls: 1, tool_failures: 0, changed_files: [], duration_seconds: 1, timed_out: false, final_text: "done", model: "mimo-v2.5", backend: "opencode", provider: "m2c-mimo", session_id: null, workstream: null, packet: null, budget_minutes: 20, context_estimate_tokens: null, context_percent: null, checkpoint_recommended: false, agent: "build"}
+        let backend_file = ($test_root | path join "phase-main-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        let job_id = "phase-main-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let job_spec = {job_id: $job_id, repo: "local/phase", issue_number: 1, title: "Phase test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/phase", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let result = (controller-runner $job_dir $job_spec "Phase test work.")
+            assert ($result.result_record | is-not-empty) "result record present"
+        }
+        let written = (flight-read-result $job_id)
+        assert ($written != null) "result written"
+        assert-equal ($written.phase? | default "MISSING") "main" "phase is main"
+        assert-equal ($written.generation? | default (-1)) 0 "generation is 0"
+    })
+    (test "controller-closeout-runner writes phase closeout and generation 1" {
+        let fake_repo = ($test_root | path join "phase-closeout-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "phase-closeout-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let test_result = {status: "completed", exit_code: 0, tool_calls: 1, tool_failures: 0, changed_files: [], duration_seconds: 1, timed_out: false, final_text: "closeout done", model: "mimo-v2.5", backend: "opencode", provider: "m2c-mimo", session_id: null, workstream: null, packet: null, budget_minutes: 5, context_estimate_tokens: null, context_percent: null, checkpoint_recommended: false}
+        let backend_file = ($test_root | path join "phase-closeout-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        let job_id = "phase-closeout-001"
+        let job_spec = {job_id: $job_id, repo: "local/phase", issue_number: 2, title: "Phase closeout test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/phase-closeout", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let result = (controller-closeout-runner $work $job_spec 5 (date now))
+            assert ($result | is-not-empty) "closeout result present"
+        }
+        let written = (flight-read-result $job_id)
+        assert ($written != null) "closeout result written"
+        assert-equal ($written.phase? | default "MISSING") "closeout" "phase is closeout"
+        assert-equal ($written.generation? | default (-1)) 1 "generation is 1"
+        assert-equal $written.closeout_ran true "closeout_ran is true"
+    })
+    (test "closeout race: stale main result superseded, closeout result finalizes" {
+        let job_id = "race-closeout-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let jobspec = {job_id: $job_id, repo: "test/race", issue_number: 10, title: "Race test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/race", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/race", resource_key: "test/race:mimo/race"}
+        flight-append-event $job_id {event: "claimed", repo: "test/race", issue: 10}
+        flight-append-event $job_id {event: "runner_start"}
+        let stale_main_result = {
+            job_id: $job_id
+            repo: "test/race"
+            issue_number: 10
+            title: "Race test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "PARTIAL"
+            failure_signature: null
+            duration_seconds: 100
+            exit_code: 130
+            local_branch: "mimo/race"
+            local_sha: "abc123"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "abc123"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 3
+            tool_calls: 5
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "main"
+            generation: 0
+        }
+        flight-write-result $job_id $stale_main_result
+        let closeout_started_job = {
+            job_id: $job_id
+            job_dir: $job_dir
+            jobspec: $jobspec
+            resource_key: "test/race:mimo/race"
+            original_title: "Race test"
+            admission: {ok: true, packet: "test"}
+            started_at: ((date now) - 1200sec)
+            soft_deadline_ns: 960000000000
+            hard_deadline_ns: 1200000000000
+            closeout_started: true
+            child_job: null
+            child_tag: (worker-mailbox-tag)
+        }
+        let read_back = (flight-read-result $job_id)
+        assert (not (controller-result-authoritative $read_back $closeout_started_job.closeout_started)) "stale main result is NOT authoritative after closeout starts"
+        flight-append-event $job_id {event: "main_result_superseded", phase: "main", generation: 0, category: "PARTIAL", reason: "closeout_started; main result is historical evidence only"}
+        let closeout_result = {
+            job_id: $job_id
+            repo: "test/race"
+            issue_number: 10
+            title: "Race test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "DONE"
+            failure_signature: null
+            duration_seconds: 50
+            exit_code: 0
+            local_branch: "mimo/race"
+            local_sha: "def456"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "def456"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 5
+            tool_calls: 8
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: true
+            closeout_duration_seconds: 50
+            phase: "closeout"
+            generation: 1
+        }
+        flight-write-result $job_id $closeout_result
+        let final_result = (flight-read-result $job_id)
+        assert (controller-result-authoritative $final_result $closeout_started_job.closeout_started) "closeout result IS authoritative after closeout starts"
+        controller-finalize-job $closeout_started_job $final_result
+        let events = (flight-read-events $job_id)
+        assert ($events | any {|e| $e.event == "main_result_superseded"}) "superseded event recorded"
+        assert ($events | any {|e| $e.event == "finalized"}) "finalized event recorded"
+        let finalized_event = ($events | where {|e| $e.event == "finalized"} | first)
+        assert-equal $finalized_event.category "DONE" "finalized with closeout result, not stale main result"
+    })
+    (test "closeout race: main result with exit 130 never steals finalization" {
+        let job_id = "race-exit130-001"
+        let jobspec = {job_id: $job_id, repo: "test/exit130", issue_number: 11, title: "Exit 130 test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/exit130", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 25, description: null}
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/exit130", resource_key: "test/exit130:mimo/exit130"}
+        let exit130_result = {
+            job_id: $job_id
+            repo: "test/exit130"
+            issue_number: 11
+            title: "Exit 130 test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 25
+            description: null
+            category: "PARTIAL"
+            failure_signature: null
+            duration_seconds: 1200
+            exit_code: 130
+            local_branch: "mimo/exit130"
+            local_sha: "abc123"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "abc123"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 3
+            tool_calls: 5
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "main"
+            generation: 0
+        }
+        flight-write-result $job_id $exit130_result
+        let job_record = {
+            job_id: $job_id
+            job_dir: ($test_root | path join $"watch-($job_id)")
+            jobspec: $jobspec
+            resource_key: "test/exit130:mimo/exit130"
+            original_title: "Exit 130 test"
+            admission: {ok: true, packet: "test"}
+            started_at: ((date now) - 1200sec)
+            soft_deadline_ns: 1200000000000
+            hard_deadline_ns: 1500000000000
+            closeout_started: true
+            child_job: null
+            child_tag: (worker-mailbox-tag)
+        }
+        let read_result = (flight-read-result $job_id)
+        assert (not (controller-result-authoritative $read_result $job_record.closeout_started)) "exit 130 main result rejected after closeout"
+        assert-equal $read_result.exit_code 130 "exit code preserved as evidence"
+        assert-equal $read_result.category "PARTIAL" "category preserved as evidence"
+    })
+    (test "closeout race: hard deadline writes TIMED_OUT when stale main result exists but closeout started" {
+        let job_id = "race-hard-001"
+        let jobspec = {job_id: $job_id, repo: "test/hard", issue_number: 12, title: "Hard deadline test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/hard", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/hard", resource_key: "test/hard:mimo/hard"}
+        let stale_result = {
+            job_id: $job_id
+            repo: "test/hard"
+            issue_number: 12
+            title: "Hard deadline test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "PARTIAL"
+            failure_signature: null
+            duration_seconds: 100
+            exit_code: 130
+            local_branch: "mimo/hard"
+            local_sha: "abc123"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "abc123"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 2
+            tool_calls: 3
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "main"
+            generation: 0
+        }
+        flight-write-result $job_id $stale_result
+        let existing = (flight-read-result $job_id)
+        let closeout_started = true
+        assert (not (controller-result-authoritative $existing $closeout_started)) "stale main result not authoritative"
+    })
+    (test "pre-soft normal result with phase main finalizes normally" {
+        let job_id = "pre-soft-001"
+        let jobspec = {job_id: $job_id, repo: "test/pre-soft", issue_number: 13, title: "Pre-soft test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/pre-soft", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/pre-soft", resource_key: "test/pre-soft:mimo/pre-soft"}
+        let normal_result = {
+            job_id: $job_id
+            repo: "test/pre-soft"
+            issue_number: 13
+            title: "Pre-soft test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "DONE"
+            failure_signature: null
+            duration_seconds: 100
+            exit_code: 0
+            local_branch: "mimo/pre-soft"
+            local_sha: "abc123"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "abc123"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 3
+            tool_calls: 5
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "main"
+            generation: 0
+        }
+        flight-write-result $job_id $normal_result
+        let job_record = {
+            job_id: $job_id
+            job_dir: ($test_root | path join $"watch-($job_id)")
+            jobspec: $jobspec
+            resource_key: "test/pre-soft:mimo/pre-soft"
+            original_title: "Pre-soft test"
+            admission: {ok: true, packet: "test"}
+            started_at: ((date now) - 100sec)
+            soft_deadline_ns: 960000000000
+            hard_deadline_ns: 1200000000000
+            closeout_started: false
+            child_job: null
+            child_tag: (worker-mailbox-tag)
+        }
+        let read_result = (flight-read-result $job_id)
+        assert (controller-result-authoritative $read_result $job_record.closeout_started) "pre-soft main result IS authoritative"
+        controller-finalize-job $job_record $read_result
+        let events = (flight-read-events $job_id)
+        let finalized = ($events | where {|e| $e.event == "finalized"})
+        assert-equal ($finalized | length) 1 "finalized exactly once"
+        assert-equal ($finalized | first).category "DONE" "finalized as DONE"
+    })
+    (test "flight recorder preserves superseded main result as evidence" {
+        let job_id = "evidence-001"
+        let stale_result = {
+            job_id: $job_id
+            repo: "test/evidence"
+            issue_number: 14
+            title: "Evidence test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "PARTIAL"
+            failure_signature: null
+            duration_seconds: 100
+            exit_code: 130
+            local_branch: "mimo/evidence"
+            local_sha: "abc123"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "abc123"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 2
+            tool_calls: 3
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "main"
+            generation: 0
+        }
+        flight-write-result $job_id $stale_result
+        flight-append-event $job_id {event: "main_result_superseded", phase: "main", generation: 0, category: "PARTIAL", reason: "closeout_started; main result is historical evidence only"}
+        let closeout_result = {
+            job_id: $job_id
+            repo: "test/evidence"
+            issue_number: 14
+            title: "Evidence test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "DONE"
+            failure_signature: null
+            duration_seconds: 50
+            exit_code: 0
+            local_branch: "mimo/evidence"
+            local_sha: "def456"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "def456"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 5
+            tool_calls: 8
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: true
+            closeout_duration_seconds: 50
+            phase: "closeout"
+            generation: 1
+        }
+        flight-write-result $job_id $closeout_result
+        let events = (flight-read-events $job_id)
+        assert ($events | any {|e| $e.event == "main_result_superseded"}) "superseded event preserved"
+        let superseded = ($events | where {|e| $e.event == "main_result_superseded"} | first)
+        assert-equal $superseded.category "PARTIAL" "superseded event records original category"
+        assert-equal $superseded.phase "main" "superseded event records main phase"
+        assert-equal $superseded.generation 0 "superseded event records generation 0"
+        let final_result = (flight-read-result $job_id)
+        assert-equal $final_result.category "DONE" "canonical result is closeout DONE"
+        assert-equal ($final_result.phase? | default "MISSING") "closeout" "canonical phase is closeout"
+    })
+    (test "closeout exception result has phase closeout and generation 1" {
+        let job_id = "closeout-phase-001"
+        let result_record = {
+            job_id: $job_id
+            repo: "test/closeout-phase"
+            issue_number: 15
+            title: "Closeout phase test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "INTERNAL_ERROR"
+            failure_signature: "closeout_exception"
+            duration_seconds: 0
+            exit_code: 1
+            timed_out: false
+            local_branch: ""
+            local_sha: ""
+            worktree_clean: false
+            remote_exists: false
+            remote_sha: ""
+            sha_match: false
+            branch_match: false
+            changed_file_count: 0
+            tool_calls: 0
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: true
+            phase: "closeout"
+            generation: 1
+        }
+        flight-write-result $job_id $result_record
+        let read_back = (flight-read-result $job_id)
+        assert-equal ($read_back.phase? | default "MISSING") "closeout" "closeout exception has closeout phase"
+        assert-equal ($read_back.generation? | default (-1)) 1 "closeout exception has generation 1"
+        assert (controller-result-authoritative $read_back true) "closeout exception is authoritative"
+    })
+    (test "hard deadline result has phase closeout and generation 1" {
+        let job_id = "hard-phase-001"
+        let result_record = {
+            job_id: $job_id
+            repo: "test/hard-phase"
+            issue_number: 16
+            title: "Hard phase test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "TIMED_OUT"
+            failure_signature: "watchdog_timeout"
+            duration_seconds: 1200
+            exit_code: 124
+            timed_out: true
+            local_branch: ""
+            local_sha: ""
+            worktree_clean: false
+            remote_exists: false
+            remote_sha: ""
+            sha_match: false
+            branch_match: false
+            changed_file_count: 0
+            tool_calls: 0
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "closeout"
+            generation: 1
+        }
+        flight-write-result $job_id $result_record
+        let read_back = (flight-read-result $job_id)
+        assert-equal ($read_back.phase? | default "MISSING") "closeout" "hard deadline has closeout phase"
+        assert-equal ($read_back.generation? | default (-1)) 1 "hard deadline has generation 1"
+    })
+    (test "closeout never returns: hard deadline produces proper timeout" {
+        let job_id = "no-closeout-001"
+        let jobspec = {job_id: $job_id, repo: "test/no-closeout", issue_number: 17, title: "No closeout test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/no-closeout", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/no-closeout", resource_key: "test/no-closeout:mimo/no-closeout"}
+        let stale_result = {
+            job_id: $job_id
+            repo: "test/no-closeout"
+            issue_number: 17
+            title: "No closeout test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "PARTIAL"
+            failure_signature: null
+            duration_seconds: 100
+            exit_code: 130
+            local_branch: "mimo/no-closeout"
+            local_sha: "abc123"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "abc123"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 2
+            tool_calls: 3
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "main"
+            generation: 0
+        }
+        flight-write-result $job_id $stale_result
+        let existing = (flight-read-result $job_id)
+        assert (not (controller-result-authoritative $existing true)) "stale main not authoritative"
+    })
+    (test "all existing result records have phase and generation fields after fix" {
+        let fake_repo = ($test_root | path join "schema-check-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "schema-check-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let test_result = {status: "completed", exit_code: 0, tool_calls: 1, tool_failures: 0, changed_files: [], duration_seconds: 1, timed_out: false, final_text: "done", model: "mimo-v2.5", backend: "opencode", provider: "m2c-mimo", session_id: null, workstream: null, packet: null, budget_minutes: 20, context_estimate_tokens: null, context_percent: null, checkpoint_recommended: false, agent: "build"}
+        let backend_file = ($test_root | path join "schema-check-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        let job_id = "schema-check-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let job_spec = {job_id: $job_id, repo: "local/schema", issue_number: 1, title: "Schema check", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/schema", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let _result = (controller-runner $job_dir $job_spec "Schema check work.")
+        }
+        let written = (flight-read-result $job_id)
+        assert ($written != null) "result written"
+        assert ($written | columns | any {|c| $c == "phase"}) "phase column present"
+        assert ($written | columns | any {|c| $c == "generation"}) "generation column present"
+    })
 ]
 
 print ($results | table)

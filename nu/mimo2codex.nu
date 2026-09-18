@@ -1508,6 +1508,8 @@ def controller-runner [job_dir: path job: record packet: string] {
             tool_failures: 0
             completed_at: (iso-now-utc)
             closeout_ran: false
+            phase: "main"
+            generation: 0
         }
         flight-write-result $job.job_id $result_record
         {exit_code: 1, timed_out: false, cancelled: false, result_record: $result_record}
@@ -1559,6 +1561,8 @@ def controller-run-main [clone_dir: path job: record packet: string] {
         tool_failures: ($summary.tool_failures? | default 0)
         completed_at: (iso-now-utc)
         closeout_ran: false
+        phase: "main"
+        generation: 0
     }
     flight-write-result $job.job_id $result_record
     {exit_code: ($summary.exit_code? | default 0), timed_out: ($summary.timed_out? | default false), cancelled: ($summary.status == "cancelled"), result_record: $result_record}
@@ -1610,9 +1614,19 @@ def controller-closeout-runner [clone_dir: path job: record closeout_budget_minu
         completed_at: (iso-now-utc)
         closeout_ran: true
         closeout_duration_seconds: $closeout_duration
+        phase: "closeout"
+        generation: 1
     }
     flight-write-result $job.job_id $result_record
     $result_record
+}
+
+def controller-result-authoritative [result_record: any closeout_started: bool] {
+    if ($result_record == null) { false } else if (not $closeout_started) { true } else {
+        let phase = ($result_record.phase? | default "main")
+        let generation = ($result_record.generation? | default 0)
+        ($phase == "closeout") or ($generation >= 1)
+    }
 }
 
 def controller-finalize-job [job_record: record result_record: record] {
@@ -1915,6 +1929,8 @@ def watch-command [args: list<string>] {
                                                 tool_failures: 0
                                                 completed_at: (iso-now-utc)
                                                 closeout_ran: false
+                                                phase: "main"
+                                                generation: 0
                                             }
                                             flight-write-result $job_id $result_record
                                         }
@@ -1966,58 +1982,64 @@ def watch-command [args: list<string>] {
                 if $result_exists {
                     let result_record = (flight-read-result $job_record.job_id)
                     if ($result_record != null) {
-                        controller-finalize-job $job_record $result_record
-                        let duration_str = (human-duration ($result_record.duration_seconds? | default 0))
-                        let local_sha_short = (($result_record.local_sha? | default "") | str substring 0..7)
-                        let receipt_parts = [
-                            ($result_record.category? | default "?")
-                            $job_record.original_title
-                            $job_record.jobspec.repo
-                            $"($job_record.jobspec.worker)/($job_record.jobspec.profile)"
-                            $duration_str
-                            $"($result_record.changed_file_count? | default 0) files"
-                            (if ($result_record.local_sha? | default "" | is-not-empty) { $local_sha_short } else { "" })
-                            (if ($result_record.remote_exists? | default false) { "remote ok" } else { "no remote branch" })
-                            (if ($result_record.closeout_ran? | default false) { "closeout ran" } else { "" })
-                            (if ($result_record.failure_signature? | default null | is-not-empty) and ($result_record.category? | default "") != "DONE" { $result_record.failure_signature } else { "" })
-                        ] | where {|p| ($p | is-not-empty)}
-                        let receipt_line = ($receipt_parts | str join " · ")
-                        if $tty_on {
-                            $pending_receipts = ($pending_receipts | append $receipt_line)
+                        if (controller-result-authoritative $result_record $job_record.closeout_started) {
+                            controller-finalize-job $job_record $result_record
+                            let duration_str = (human-duration ($result_record.duration_seconds? | default 0))
+                            let local_sha_short = (($result_record.local_sha? | default "") | str substring 0..7)
+                            let receipt_parts = [
+                                ($result_record.category? | default "?")
+                                $job_record.original_title
+                                $job_record.jobspec.repo
+                                $"($job_record.jobspec.worker)/($job_record.jobspec.profile)"
+                                $duration_str
+                                $"($result_record.changed_file_count? | default 0) files"
+                                (if ($result_record.local_sha? | default "" | is-not-empty) { $local_sha_short } else { "" })
+                                (if ($result_record.remote_exists? | default false) { "remote ok" } else { "no remote branch" })
+                                (if ($result_record.closeout_ran? | default false) { "closeout ran" } else { "" })
+                                (if ($result_record.failure_signature? | default null | is-not-empty) and ($result_record.category? | default "") != "DONE" { $result_record.failure_signature } else { "" })
+                            ] | where {|p| ($p | is-not-empty)}
+                            let receipt_line = ($receipt_parts | str join " · ")
+                            if $tty_on {
+                                $pending_receipts = ($pending_receipts | append $receipt_line)
+                            } else {
+                                print $receipt_line
+                            }
+                            $completed_indices = ($completed_indices | append $idx)
                         } else {
-                            print $receipt_line
+                            flight-append-event $job_record.job_id {event: "main_result_superseded", phase: ($result_record.phase? | default "main"), generation: ($result_record.generation? | default 0), category: ($result_record.category? | default "?"), reason: "closeout_started; main result is historical evidence only"}
                         }
-                        $completed_indices = ($completed_indices | append $idx)
                     }
                 } else if (not $result_exists) and (($child_msg != null) or (not $child_alive)) {
-                    let result_record = {
-                        job_id: $job_record.job_id
-                        repo: $job_record.jobspec.repo
-                        issue_number: $job_record.jobspec.issue_number
-                        title: $job_record.original_title
-                        worker: $job_record.jobspec.worker
-                        profile: $job_record.jobspec.profile
-                        mode: $job_record.jobspec.mode
-                        budget_minutes: $job_record.jobspec.budget_minutes
-                        description: $job_record.jobspec.description
-                        category: "INTERNAL_ERROR"
-                        failure_signature: "runner_disappeared"
-                        duration_seconds: (($elapsed_ns / 1000000000) | math round | into int)
-                        exit_code: 1
-                        timed_out: false
-                        local_branch: ""
-                        local_sha: ""
-                        worktree_clean: false
-                        remote_exists: false
-                        remote_sha: ""
-                        sha_match: false
-                        branch_match: false
-                        changed_file_count: 0
-                        tool_calls: 0
-                        tool_failures: 0
-                        completed_at: (iso-now-utc)
-                        closeout_ran: false
-                    }
+                let result_record = {
+                    job_id: $job_record.job_id
+                    repo: $job_record.jobspec.repo
+                    issue_number: $job_record.jobspec.issue_number
+                    title: $job_record.original_title
+                    worker: $job_record.jobspec.worker
+                    profile: $job_record.jobspec.profile
+                    mode: $job_record.jobspec.mode
+                    budget_minutes: $job_record.jobspec.budget_minutes
+                    description: $job_record.jobspec.description
+                    category: "INTERNAL_ERROR"
+                    failure_signature: "runner_disappeared"
+                    duration_seconds: (($elapsed_ns / 1000000000) | math round | into int)
+                    exit_code: 1
+                    timed_out: false
+                    local_branch: ""
+                    local_sha: ""
+                    worktree_clean: false
+                    remote_exists: false
+                    remote_sha: ""
+                    sha_match: false
+                    branch_match: false
+                    changed_file_count: 0
+                    tool_calls: 0
+                    tool_failures: 0
+                    completed_at: (iso-now-utc)
+                    closeout_ran: false
+                    phase: "main"
+                    generation: 0
+                }
                     flight-append-event $job_record.job_id {event: "runner_disappeared", reason: (if $child_msg != null { "child sent terminal message but no result.json" } else { "child job exited without terminal message or result.json" })}
                     flight-write-result $job_record.job_id $result_record
                     controller-finalize-job $job_record $result_record
@@ -2073,6 +2095,8 @@ def watch-command [args: list<string>] {
                                     tool_failures: 0
                                     completed_at: (iso-now-utc)
                                     closeout_ran: true
+                                    phase: "closeout"
+                                    generation: 1
                                 }
                                 flight-write-result $job_record.job_id $result_record
                             }
@@ -2089,7 +2113,8 @@ def watch-command [args: list<string>] {
                     if not $tty_on { print $"Hard deadline hit for ($job_record.original_title). Forcing completion." }
                     flight-append-event $job_record.job_id {event: "hard_deadline_hit"}
                     try { job kill $job_record.child_job } catch { }
-                    if (not (flight-job-dir $job_record.job_id | path join "result.json" | path exists)) {
+                    let existing_result = (flight-read-result $job_record.job_id)
+                    if (not (controller-result-authoritative $existing_result $job_record.closeout_started)) {
                         let result_record = {
                             job_id: $job_record.job_id
                             repo: $job_record.jobspec.repo
@@ -2117,6 +2142,8 @@ def watch-command [args: list<string>] {
                             tool_failures: 0
                             completed_at: (iso-now-utc)
                             closeout_ran: false
+                            phase: "closeout"
+                            generation: 1
                         }
                         flight-write-result $job_record.job_id $result_record
                         controller-finalize-job $job_record $result_record
