@@ -1,10 +1,10 @@
 # mimo2codex
 
-`mimo2codex` gives Codex and local development workflows a simple way to delegate bounded work to Xiaomi MiMo without requiring a second agent station. `m2c` is the public interface; OpenCode is the current replaceable worker backend underneath it.
+`mimo2codex` gives Codex and local development workflows a simple way to delegate bounded work to Xiaomi MiMo and Meta Muse Spark without requiring a second agent station. `m2c` is the public interface; OpenCode is the current replaceable worker backend underneath it.
 
-The worker uses Xiaomi's documented OpenCode/OpenAI-compatible integration at the Europe Token Plan endpoint. It does not use MiMo's unreliable Responses tool path for worker execution, and it never executes textual pseudo-tool calls.
+The worker uses Xiaomi's documented OpenCode/OpenAI-compatible integration at the Europe Token Plan endpoint and Meta's OpenAI-compatible Responses endpoint. It does not use MiMo's unreliable Responses tool path for worker execution, and it never executes textual pseudo-tool calls.
 
-Requirements: Nushell 0.115+, OpenAI Codex CLI for the experimental direct route, OpenCode 1.18+ for worker execution, and a Xiaomi MiMo Token Plan. Windows, Linux, and WSL are supported.
+Requirements: Nushell 0.115+, OpenAI Codex CLI for the experimental direct route, OpenCode 1.18+ for worker execution, and a Xiaomi MiMo Token Plan and/or Meta Model API key. Windows, Linux, and WSL are supported.
 
 ## Quick start
 
@@ -22,6 +22,13 @@ m2c doctor
 m2c
 ```
 
+To enable the Meta backend (optional):
+
+```text
+m2c meta setup
+m2c meta doctor
+```
+
 If OpenCode is missing, `m2c setup` reports the detected state and the Nu-native installation command to use: `npm install -g opencode-ai`.
 
 ## Public commands
@@ -35,7 +42,7 @@ m2c standard run "task"     machine standard worker
 m2c pro run --json "task"   machine Pro worker with JSON envelope
 m2c run --workstream NAME --packet A1 --json "task"
 m2c standard run --quiet --json "task"
-m2c models
+m2c models                  list all models (MiMo + Meta)
 m2c doctor [--live]
 m2c key status|replace|remove
 m2c checkpoint --workstream NAME
@@ -47,6 +54,18 @@ m2c status                  show m2c status and recent jobs
 m2c inspect <job-id>        show flight recorder timeline for a job
 m2c version
 m2c uninstall
+```
+
+### Meta backend commands
+
+```text
+m2c meta run "task"           run with Meta Muse Spark contributor
+m2c meta contributor run "task"  explicit contributor profile
+m2c meta setup                configure Meta backend
+m2c meta doctor [--live]      diagnose Meta configuration
+m2c meta key status           show Meta credential status
+m2c meta key replace          replace Meta credential
+m2c meta key remove           remove Meta credential
 ```
 
 Every machine run explicitly selects `m2c-mimo/mimo-v2.5` or `m2c-mimo/mimo-v2.5-pro`, passes the current directory with `--dir`, and uses `--format json`. Normal output is a small stable envelope containing status, provider, model, session, packet, tool counts, context estimate, exit code, and final text. Raw OpenCode events remain local job evidence.
@@ -83,7 +102,20 @@ budget_minutes: 45
 ---
 ```
 
-`model` must be `standard` or `pro`. `budget_minutes` is optional, defaults to 20, accepts only integer values from 5 through 120 inclusive, and fails closed when present but invalid. Before claiming a job, m2c revalidates the live issue, owner, title/state, base SHA, branch and packet. Completion still requires the requested branch, a clean worktree, a remote branch, and matching local/remote SHA. Worker prose is evidence; these delivery facts are checked mechanically by m2c.
+For Meta backend jobs:
+
+```yaml
+---
+m2c_job: 1
+base: <exact 40-character commit SHA>
+branch: <non-main worker branch>
+worker: meta
+model: contributor
+budget_minutes: 45
+---
+```
+
+`worker` must be `mimo` (default) or `meta`. For MiMo, `model` must be `standard` or `pro`. For Meta, `model` must be `contributor`. `budget_minutes` is optional, defaults to 20, accepts only integer values from 5 through 120 inclusive, and fails closed when present but invalid. Before claiming a job, m2c revalidates the live issue, owner, title/state, base SHA, branch and packet. Completion still requires the requested branch, a clean worktree, a remote branch, and matching local/remote SHA. Worker prose is evidence; these delivery facts are checked mechanically by m2c.
 
 ### Result categories
 
@@ -113,9 +145,9 @@ Credentials, API keys, environment secrets, and raw provider payloads are never 
 
 ## Configuration and security
 
-Each worker run injects an m2c-owned `OPENCODE_CONFIG_CONTENT` at runtime. It contains only the unique `m2c-mimo` provider, both supported models, the AMS endpoint, the provider allowlist, and bounded worker permissions. The API key remains in the existing local credential file and is referenced through `{env:MIMO_API_KEY}`; it is never serialized into runtime JSON, TOML, logs, or the repository.
+Each worker run injects an m2c-owned `OPENCODE_CONFIG_CONTENT` at runtime. For MiMo, it contains only the unique `m2c-mimo` provider, both supported models, the AMS endpoint, the provider allowlist, and bounded worker permissions. For Meta, it contains only the `m2c-meta` provider, the muse-spark-1.3-contributor model, the Meta endpoint, and the same bounded worker permissions. API keys remain in local credential files and are referenced through `{env:MIMO_API_KEY}` or `{env:MODEL_API_KEY}`; they are never serialized into runtime JSON, TOML, logs, or the repository.
 
-The m2c skill is installed only in `CODEX_HOME/skills/mimo-worker/SKILL.md` (or the normal `~/.codex/skills` location when `CODEX_HOME` is unset). It does not modify global `AGENTS.md` or unrelated skills. `m2c uninstall` removes only that skill directory and m2c-owned state.
+The m2c skills are installed in `CODEX_HOME/skills/mimo-worker/SKILL.md` and `CODEX_HOME/skills/meta-worker/SKILL.md` (or the normal `~/.codex/skills` location when `CODEX_HOME` is unset). They do not modify global `AGENTS.md` or unrelated skills. `m2c uninstall` removes only those skill directories and m2c-owned state.
 
 OpenCode is not an OS sandbox. Its worker policy allows normal project work, denies questions and nested subagents in machine mode, denies web access and external-directory access, and fails closed when the worker cannot complete. No provider fallback is configured.
 
