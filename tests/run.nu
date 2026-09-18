@@ -806,6 +806,123 @@ let results = [
         let can_be_done = (false) and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match and $delivery.branch_match
         assert (not $can_be_done) "fallback delivery prevents DONE"
     })
+    # --- budget_minutes validation ---
+    (test "budget_minutes defaults to 20 when omitted" {
+        let result = (watch-parse-budget null)
+        assert $result.ok "null budget is ok"
+        assert-equal $result.budget 20 "default budget is 20"
+    })
+    (test "budget_minutes defaults to 20 when empty string" {
+        let result = (watch-parse-budget "")
+        assert $result.ok "empty budget is ok"
+        assert-equal $result.budget 20 "default budget is 20"
+    })
+    (test "budget_minutes accepts minimum 5" {
+        let result = (watch-parse-budget "5")
+        assert $result.ok "5 is valid"
+        assert-equal $result.budget 5 "budget is 5"
+    })
+    (test "budget_minutes accepts 20" {
+        let result = (watch-parse-budget "20")
+        assert $result.ok "20 is valid"
+        assert-equal $result.budget 20 "budget is 20"
+    })
+    (test "budget_minutes accepts value greater than 20 (45)" {
+        let result = (watch-parse-budget "45")
+        assert $result.ok "45 is valid"
+        assert-equal $result.budget 45 "budget is 45"
+    })
+    (test "budget_minutes accepts maximum 120" {
+        let result = (watch-parse-budget "120")
+        assert $result.ok "120 is valid"
+        assert-equal $result.budget 120 "budget is 120"
+    })
+    (test "budget_minutes rejects 4 (below minimum)" {
+        let result = (watch-parse-budget "4")
+        assert (not $result.ok) "4 is rejected"
+        assert ($result.reason | str contains "at least 5") "reason mentions minimum"
+    })
+    (test "budget_minutes rejects 121 (above maximum)" {
+        let result = (watch-parse-budget "121")
+        assert (not $result.ok) "121 is rejected"
+        assert ($result.reason | str contains "at most 120") "reason mentions maximum"
+    })
+    (test "budget_minutes rejects non-integer (3.5)" {
+        let result = (watch-parse-budget "3.5")
+        assert (not $result.ok) "3.5 is rejected"
+        assert ($result.reason | str contains "fractional") "reason mentions fractional"
+    })
+    (test "budget_minutes rejects malformed text" {
+        let result = (watch-parse-budget "abc")
+        assert (not $result.ok) "abc is rejected"
+        assert ($result.reason | str contains "integer") "reason mentions integer"
+    })
+    # --- budget_minutes in packet validation ---
+    (test "watch validate includes budget_minutes in result" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard", budget_minutes: "45"}
+        let result = (watch-validate-packet $fm)
+        assert $result.ok "valid job with budget accepted"
+        assert-equal $result.budget_minutes 45 "budget extracted"
+    })
+    (test "watch validate defaults budget when omitted" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert $result.ok "valid job without budget accepted"
+        assert-equal $result.budget_minutes 20 "budget defaults to 20"
+    })
+    (test "watch validate rejects invalid budget" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard", budget_minutes: "200"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "invalid budget rejected"
+        assert ($result.reason | str contains "at most 120") "reason mentions maximum"
+    })
+    # --- budget_minutes in admission record ---
+    (test "admitted watch job carries normalized budget_minutes" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard", budget_minutes: "45"}
+        let validation = (watch-validate-packet $fm)
+        assert $validation.ok "validation passes"
+        assert-equal $validation.budget_minutes 45 "budget in validation"
+    })
+    (test "admitted watch job with default budget carries 20" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard"}
+        let validation = (watch-validate-packet $fm)
+        assert $validation.ok "validation passes"
+        assert-equal $validation.budget_minutes 20 "default budget in validation"
+    })
+    # --- budget_minutes in result comment ---
+    (test "result comment includes budget line" {
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "DONE" 45)
+        assert ($comment | str contains "budget: 45m") "budget line present"
+    })
+    (test "result comment uses default budget when not specified" {
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
+        let comment = (watch-build-result-comment $summary $delivery "standard" "DONE")
+        assert ($comment | str contains "budget: 20m") "default budget line present"
+    })
+    # --- budget_minutes in worker summary telemetry ---
+    (test "worker summary includes budget_minutes in output" {
+        let summary = (worker-summary [] "mimo-v2.5" null null 0 0 false false null 45)
+        assert-equal $summary.budget_minutes 45 "budget in summary"
+    })
+    (test "worker summary uses default budget when not specified" {
+        let summary = (worker-summary [] "mimo-v2.5" null null 0 0 false)
+        assert-equal $summary.budget_minutes 20 "default budget in summary"
+    })
+    # --- watchdog override still works with budget ---
+    (test "test watchdog override still works with budget" {
+        $env.M2C_TEST_WATCHDOG_MS = "5000"
+        let ns = (watchdog-limit-from-budget 45)
+        assert-equal $ns 5000000000 "test override takes precedence"
+        $env.M2C_TEST_WATCHDOG_MS = ""
+    })
+    (test "budget-based watchdog calculation is correct" {
+        $env.M2C_TEST_WATCHDOG_MS = ""
+        let ns = (watchdog-limit-from-budget 45)
+        assert-equal $ns (45 * 60 * 1000000000) "45 minutes in nanoseconds"
+    })
     # --- mailbox isolation: worker-mailbox-tag ---
     (test "worker-mailbox-tag produces numeric values" {
         let tag = (worker-mailbox-tag)

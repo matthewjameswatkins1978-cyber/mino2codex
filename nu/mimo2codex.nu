@@ -441,7 +441,7 @@ def console-meaningful-event [event: any] {
     ($event.type in ["tool_use", "tool_call"] and (($tool in ["edit", "write", "patch"]) or ($status in ["error", "failed"]) or (telemetry-verification-command $event))) or ($event.type == "step_start")
 }
 
-def worker-summary [events: list<any> model: string workstream: any packet: any duration: any exit_code: int timed_out: bool cancelled: bool = false telemetry: any = null] {
+def worker-summary [events: list<any> model: string workstream: any packet: any duration: any exit_code: int timed_out: bool cancelled: bool = false telemetry: any = null budget_minutes: int = 20] {
     let sessions = ($events | get sessionID? | default [] | where {|x| $x != null} | uniq)
     let finishes = ($events | where type == "step_finish")
     let last_finish = ($finishes | last)
@@ -465,6 +465,7 @@ def worker-summary [events: list<any> model: string workstream: any packet: any 
         session_id: ($sessions | last | default null)
         workstream: ($workstream | default null)
         packet: ($packet | default null)
+        budget_minutes: $budget_minutes
         duration_seconds: $duration
         timed_out: $timed_out
         tool_calls: $tool_calls
@@ -487,6 +488,11 @@ def watchdog-limit-ns [] {
     if ($override | is-empty) { 1200000000000 } else { try { (($override | into int) * 1000000) } catch { 1200000000000 } }
 }
 
+def watchdog-limit-from-budget [budget_minutes: int] {
+    let override = ($env.M2C_TEST_WATCHDOG_MS? | default "" | str trim)
+    if ($override | is-not-empty) { try { (($override | into int) * 1000000) } catch { ($budget_minutes * 60 * 1000000000) } } else { ($budget_minutes * 60 * 1000000000) }
+}
+
 def worker-command [model: string prompt: string session_id: any cwd: path agent: string = "build" fork: bool = false] {
     let base = ["run" "--pure" "--model" (worker-model $model) "--agent" $agent "--format" "json" "--dir" ($cwd | path expand)]
     let continued = (if ($session_id == null) { $base } else if $fork { $base | append ["--session" $session_id "--fork"] } else { $base | append ["--session" $session_id] })
@@ -497,7 +503,7 @@ def result-envelope [summary: record agent: string] {
     $summary | insert agent $agent
 }
 
-def worker-run [model: string prompt: string workstream: any packet: any session_id: any quiet: bool = false agent: string = "build" fork: bool = false cwd: any = null] {
+def worker-run [model: string prompt: string workstream: any packet: any session_id: any quiet: bool = false agent: string = "build" fork: bool = false cwd: any = null budget_minutes: int = 20] {
     let opencode = (opencode-path)
     if ($opencode | is-empty) { error make {msg: "OpenCode is not installed. Run: npm install -g opencode-ai"} }
     let credential = (credential-info)
@@ -510,7 +516,7 @@ def worker-run [model: string prompt: string workstream: any packet: any session
     let command = (worker-command $model $prompt $session_id $cwd $agent $fork)
     let environment = {OPENCODE_CONFIG_CONTENT: (worker-config true | to json -r), MIMO_API_KEY: $credential.value}
     let started = (date now)
-    let watchdog_ns = (watchdog-limit-ns)
+    let watchdog_ns = (watchdog-limit-from-budget $budget_minutes)
     let watchdog_seconds = (($watchdog_ns / 1000000000) | math round | into int)
     let mailbox_tag = (worker-mailbox-tag)
     let job = (job spawn --description $"m2c OpenCode worker ($model)" {
@@ -585,7 +591,7 @@ def worker-run [model: string prompt: string workstream: any packet: any session
         $previous_lines = (render-console $frame $previous_lines)
         finish-console true $previous_lines
     }
-    let result = (result-envelope (worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out ($finished.cancelled? | default false) $telemetry_summary) $agent)
+    let result = (result-envelope (worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out ($finished.cancelled? | default false) $telemetry_summary $budget_minutes) $agent)
     {summary: $result, raw_path: $raw_path, stderr_path: $stderr_path}
 }
 
@@ -988,10 +994,13 @@ def watch-validate-packet [fm: record] {
             let branch = ($fm | get -o "branch" | default "")
             if ($branch == "main") or ($branch == "master") { {ok: false, reason: $"target branch cannot be main or master, got ($branch)"} } else if ($branch | is-empty) { {ok: false, reason: "branch field is required"} } else {
                 let model_str = ($fm | get -o "model" | default "")
-                let model = (watch-parse-model $model_str)
-                if ($model == null) { {ok: false, reason: $"invalid model ($model_str); must be standard or pro"} } else {
-                    {ok: true, base: $base, branch: $branch, model: $model}
-                }
+                    let model = (watch-parse-model $model_str)
+                    if ($model == null) { {ok: false, reason: $"invalid model ($model_str); must be standard or pro"} } else {
+                        let budget_result = (watch-parse-budget ($fm | get -o "budget_minutes" | default null))
+                        if (not $budget_result.ok) { $budget_result } else {
+                            {ok: true, base: $base, branch: $branch, model: $model, budget_minutes: $budget_result.budget}
+                        }
+                    }
             }
         }
     }
@@ -1008,6 +1017,22 @@ def watch-gh-find-job [login: string] {
 def watch-parse-model [value: string] {
     let trimmed = ($value | str trim | str trim --char '"')
     if $trimmed in ["standard", "pro"] { $trimmed } else { null }
+}
+
+def watch-parse-budget [value: any] {
+    if ($value == null) or (($value | describe) == "nothing") { {ok: true, budget: 20} } else {
+        let str_val = ($value | into string | str trim | str trim --char '"')
+        if ($str_val | is-empty) { {ok: true, budget: 20} } else {
+            if ($str_val | str contains ".") { {ok: false, reason: $"budget_minutes must be an integer, got fractional: ($str_val)"} } else {
+                let int_val = (try { $str_val | into int } catch { null })
+                if ($int_val == null) { {ok: false, reason: $"budget_minutes must be an integer, got: ($str_val)"} } else {
+                    if ($int_val < 5) { {ok: false, reason: $"budget_minutes must be at least 5, got: ($int_val)"} } else if ($int_val > 120) { {ok: false, reason: $"budget_minutes must be at most 120, got: ($int_val)"} } else {
+                        {ok: true, budget: $int_val}
+                    }
+                }
+            }
+        }
+    }
 }
 
 def watch-issue-repo [issue: record] {
@@ -1042,7 +1067,7 @@ def watch-admit-job [issue: record login: string] {
                                         let fm_end = ($body_lines | enumerate | where {|item| $item.item == "---"} | skip 1 | first)
                                         let packet = (if ($fm_end == null) { "" } else { $detail.body | lines | skip ($fm_end.index + 1) | str join "\n" | str trim })
                                         if ($packet | is-empty) { {ok: false, reason: "no worker packet after front matter"} } else {
-                                            {ok: true, base: $validation.base, branch: $validation.branch, model: $validation.model, packet: $packet, owner: $owner, repo: $repo_full, number: $issue.number, title: $issue.title, url: $issue.url}
+                                            {ok: true, base: $validation.base, branch: $validation.branch, model: $validation.model, budget_minutes: $validation.budget_minutes, packet: $packet, owner: $owner, repo: $repo_full, number: $issue.number, title: $issue.title, url: $issue.url}
                                         }
                                     }
                                 }
@@ -1083,7 +1108,8 @@ def watch-run-worker-in-job [job_dir: path job: record] {
     let model_id = (if $job.model == "standard" { (provider-data).models.standard } else { (provider-data).models.pro })
     let prompt = $"($job.packet)\n\nReturn a concise completion report with files changed, tests run and results, unresolved issues, and any evidence needed for verification."
     let agent = (worker-agent $job.packet)
-    let run = (worker-run $model_id $prompt null null null true $agent false $clone_dir)
+    let budget = ($job.budget_minutes? | default 20)
+    let run = (worker-run $model_id $prompt null null null true $agent false $clone_dir $budget)
     {summary: $run.summary, clone_dir: $clone_dir}
 }
 
@@ -1116,7 +1142,7 @@ def watch-verify-delivery [clone_dir: path job: record] {
     }
 }
 
-def watch-build-result-comment [summary: record delivery: record model: string final_status: string] {
+def watch-build-result-comment [summary: record delivery: record model: string final_status: string budget_minutes: int = 20] {
     let status = $final_status
     let exit_code = ($summary.exit_code? | default 1)
     let worktree_status = (if $delivery.worktree_clean { "CLEAN" } else { "DIRTY" })
@@ -1133,6 +1159,7 @@ def watch-build-result-comment [summary: record delivery: record model: string f
     [
         $"M2C RESULT: ($status)"
         $"model: ($model)"
+        $"budget: ($budget_minutes)m"
         $"branch: ($delivery.local_branch)"
         $"branch_match: ($branch_status)"
         $"sha: ($delivery.local_sha)"
@@ -1172,6 +1199,7 @@ def watch-command [args: list<string>] {
                         print $"Base: ($admission.base)"
                         print $"Branch: ($admission.branch)"
                         print $"Model: ($admission.model)"
+                        print $"Budget: ($admission.budget_minutes)m"
                         let run_result = (try {
                             watch-run-worker-in-job $job_dir $admission
                         } catch {|err|
@@ -1186,7 +1214,7 @@ def watch-command [args: list<string>] {
                         let final_status = (if $can_be_done { "DONE" } else { "FAILED" })
                         let final_title = $"[M2C ($final_status)]"
                         watch-update-title $admission.repo $admission.number $final_title
-                        let comment = (watch-build-result-comment $run_result.summary $delivery $admission.model $final_status)
+                        let comment = (watch-build-result-comment $run_result.summary $delivery $admission.model $final_status $admission.budget_minutes)
                         watch-add-comment $admission.repo $admission.number $comment
                         print $"Job ($final_status). Title: ($final_title)"
                         $running = false
