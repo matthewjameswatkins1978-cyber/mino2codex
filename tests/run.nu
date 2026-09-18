@@ -2696,7 +2696,7 @@ let results = [
         assert (($frame | first) | str contains "watching") "header contains watching"
         assert (($frame | first) | str contains "0 active") "header shows 0 active"
         assert (($frame | first) | str contains "1 queued") "header shows 1 queued"
-        assert (($frame | first) | str contains "0.2.4") "header contains version"
+        assert (($frame | first) | str contains "0.2.5") "header contains version"
     })
     (test "live-panel-frame shows active job details" {
         let now = (date now)
@@ -2826,9 +2826,9 @@ let results = [
             assert (($line | describe) == "string") "each line is a string"
         }
     })
-    # --- live panel: version value is 0.2.3 ---
-    (test "version-value returns 0.2.4" {
-        assert-equal (version-value) "0.2.4" "version bumped"
+    # --- live panel: version value is 0.2.5 ---
+    (test "version-value returns 0.2.5" {
+        assert-equal (version-value) "0.2.5" "version bumped"
     })
     # --- live panel: queue count reflects controller truth ---
     (test "live-panel-state queued count passes through from controller" {
@@ -3898,6 +3898,269 @@ let results = [
         assert ($written != null) "result written"
         assert ($written | columns | any {|c| $c == "phase"}) "phase column present"
         assert ($written | columns | any {|c| $c == "generation"}) "generation column present"
+    })
+    # --- dependency parsing ---
+    (test "parse-depends-on handles null" {
+        assert-equal (parse-depends-on null) [] "null returns empty"
+    })
+    (test "parse-depends-on handles bracket syntax" {
+        let deps = (parse-depends-on "[41, 42]")
+        assert-equal ($deps | length) 2 "two deps"
+        assert-equal ($deps | get 0) 41 "first dep"
+        assert-equal ($deps | get 1) 42 "second dep"
+    })
+    (test "parse-depends-on handles single bracket value" {
+        let deps = (parse-depends-on "[41]")
+        assert-equal ($deps | length) 1 "one dep"
+        assert-equal ($deps | get 0) 41 "dep value"
+    })
+    (test "parse-depends-on handles empty brackets" {
+        let deps = (parse-depends-on "[]")
+        assert-equal ($deps | length) 0 "empty deps"
+    })
+    (test "parse-depends-on handles dash list" {
+        let deps = (parse-depends-on ["41" "42" "43"])
+        assert-equal ($deps | length) 3 "three deps"
+        assert-equal ($deps | get 0) 41 "first dep"
+        assert-equal ($deps | get 1) 42 "second dep"
+        assert-equal ($deps | get 2) 43 "third dep"
+    })
+    (test "parse-depends-on handles single value string" {
+        let deps = (parse-depends-on "41")
+        assert-equal ($deps | length) 1 "one dep"
+        assert-equal ($deps | get 0) 41 "dep value"
+    })
+    (test "parse-depends-on rejects negative numbers" {
+        let deps = (parse-depends-on "[-1, 42]")
+        assert-equal ($deps | length) 1 "only valid dep"
+        assert-equal ($deps | get 0) 42 "valid dep preserved"
+    })
+    (test "parse-depends-on handles mixed valid and invalid" {
+        let deps = (parse-depends-on "[abc, 42, !@#]")
+        assert-equal ($deps | length) 1 "only valid dep"
+        assert-equal ($deps | get 0) 42 "valid dep preserved"
+    })
+    (test "parse-depends-on handles empty string" {
+        let deps = (parse-depends-on "")
+        assert-equal ($deps | length) 0 "empty string returns empty"
+    })
+    (test "parse-depends-on handles whitespace bracket syntax" {
+        let deps = (parse-depends-on "[ 41 , 42 ]")
+        assert-equal ($deps | length) 2 "two deps"
+        assert-equal ($deps | get 0) 41 "first dep"
+        assert-equal ($deps | get 1) 42 "second dep"
+    })
+    # --- dependency validation ---
+    (test "validate-depends-on accepts empty deps" {
+        assert (validate-depends-on [] 1 "repo").ok "empty deps ok"
+    })
+    (test "validate-depends-on rejects self-dependency" {
+        let result = (validate-depends-on [1] 1 "repo")
+        assert (not $result.ok) "self-dep rejected"
+        assert ($result.reason | str contains "self") "reason mentions self"
+    })
+    (test "validate-depends-on accepts valid deps" {
+        let result = (validate-depends-on [41 42] 10 "repo")
+        assert $result.ok "valid deps accepted"
+    })
+    (test "validate-depends-on rejects zero issue number" {
+        let result = (validate-depends-on [0] 1 "repo")
+        assert (not $result.ok) "zero rejected"
+    })
+    (test "validate-depends-on rejects negative issue number" {
+        let result = (validate-depends-on [-1] 1 "repo")
+        assert (not $result.ok) "negative rejected"
+    })
+    # --- front matter parsing with depends_on ---
+    (test "front matter parses depends_on bracket syntax" {
+        let body = "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\ndepends_on: [41, 42]\n---\ndo work"
+        let fm = (watch-gh-parse-front-matter $body)
+        assert ($fm != null) "front matter found"
+        let deps = (parse-depends-on ($fm | get -o "depends_on" | default null))
+        assert-equal ($deps | length) 2 "two deps"
+        assert-equal ($deps | get 0) 41 "first dep"
+        assert-equal ($deps | get 1) 42 "second dep"
+    })
+    (test "front matter parses depends_on dash syntax" {
+        let body = "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\ndepends_on:\n- 41\n- 42\n---\ndo work"
+        let fm = (watch-gh-parse-front-matter $body)
+        assert ($fm != null) "front matter found"
+        let deps = (parse-depends-on ($fm | get -o "depends_on" | default null))
+        assert-equal ($deps | length) 2 "two deps"
+        assert-equal ($deps | get 0) 41 "first dep"
+        assert-equal ($deps | get 1) 42 "second dep"
+    })
+    (test "front matter parses base_ref" {
+        let body = "---\nm2c_job: 1\nbase_ref: main\nbranch: feature/test\n---\ndo work"
+        let fm = (watch-gh-parse-front-matter $body)
+        assert ($fm != null) "front matter found"
+        assert-equal ($fm.base_ref) "main" "base_ref parsed"
+    })
+    (test "front matter handles no depends_on" {
+        let body = "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\n---\ndo work"
+        let fm = (watch-gh-parse-front-matter $body)
+        assert ($fm != null) "front matter found"
+        let deps = (parse-depends-on ($fm | get -o "depends_on" | default null))
+        assert-equal ($deps | length) 0 "no deps"
+    })
+    (test "front matter dash syntax with trailing key" {
+        let body = "---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\ndepends_on:\n- 41\n- 42\nmodel: standard\n---\ndo work"
+        let fm = (watch-gh-parse-front-matter $body)
+        assert ($fm != null) "front matter found"
+        let deps = (parse-depends-on ($fm | get -o "depends_on" | default null))
+        assert-equal ($deps | length) 2 "two deps"
+        assert-equal ($fm.model) "standard" "trailing key parsed"
+    })
+    # --- watch-validate-packet with depends_on ---
+    (test "watch validate parses depends_on from frontmatter" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard", depends_on: "[41, 42]"}
+        let result = (watch-validate-packet $fm)
+        assert $result.ok "valid job with depends_on accepted"
+        assert-equal ($result.depends_on | length) 2 "two deps parsed"
+        assert-equal ($result.depends_on | get 0) 41 "first dep"
+        assert-equal ($result.depends_on | get 1) 42 "second dep"
+    })
+    (test "watch validate parses base_ref" {
+        let fm = {m2c_job: "1", base_ref: "main", branch: "feature/test", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert $result.ok "valid job with base_ref accepted"
+        assert-equal $result.base_ref "main" "base_ref extracted"
+        assert $result.needs_deferred_base "needs deferred base"
+    })
+    (test "watch validate rejects both base and base_ref" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", base_ref: "main", branch: "feature/test", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "both base and base_ref rejected"
+        assert ($result.reason | str contains "cannot specify both") "reason mentions conflict"
+    })
+    (test "watch validate rejects neither base nor base_ref" {
+        let fm = {m2c_job: "1", branch: "feature/test", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "neither base nor base_ref rejected"
+        assert ($result.reason | str contains "base or base_ref is required") "reason mentions requirement"
+    })
+    (test "watch validate rejects invalid base_ref" {
+        let fm = {m2c_job: "1", base_ref: "develop", branch: "feature/test", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "invalid base_ref rejected"
+        assert ($result.reason | str contains "must be main or master") "reason mentions valid values"
+    })
+    (test "watch validate without depends_on has empty list" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard"}
+        let result = (watch-validate-packet $fm)
+        assert $result.ok "valid job accepted"
+        assert-equal ($result.depends_on | length) 0 "no deps"
+    })
+    # --- normalize-jobspec with depends_on ---
+    (test "normalize-jobspec includes depends_on" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard", depends_on: "[41, 42]"}
+        let jobspec = (normalize-jobspec $fm "alice/repo" 10 "Test" "alice")
+        assert-equal ($jobspec.depends_on | length) 2 "two deps in jobspec"
+        assert-equal ($jobspec.depends_on | get 0) 41 "first dep in jobspec"
+        assert-equal ($jobspec.depends_on | get 1) 42 "second dep in jobspec"
+    })
+    (test "normalize-jobspec includes base_ref" {
+        let fm = {m2c_job: "1", base_ref: "main", branch: "feature/test", model: "standard"}
+        let jobspec = (normalize-jobspec $fm "alice/repo" 10 "Test" "alice")
+        assert-equal $jobspec.base_ref "main" "base_ref in jobspec"
+        assert $jobspec.needs_deferred_base "needs_deferred_base in jobspec"
+        assert-equal $jobspec.base_sha "" "base_sha empty for deferred"
+    })
+    (test "normalize-jobspec without depends_on has empty list" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard"}
+        let jobspec = (normalize-jobspec $fm "alice/repo" 10 "Test" "alice")
+        assert-equal ($jobspec.depends_on | length) 0 "no deps in jobspec"
+    })
+    # --- deterministic ordering ---
+    (test "deterministic sort orders by issue number" {
+        let jobs = [
+            {issue_number: 10, repo: "a/repo"}
+            {issue_number: 5, repo: "a/repo"}
+            {issue_number: 20, repo: "a/repo"}
+            {issue_number: 1, repo: "a/repo"}
+        ]
+        let sorted = (watch-deterministic-sort $jobs)
+        assert-equal ($sorted | get 0 | get issue_number) 1 "first is lowest"
+        assert-equal ($sorted | get 1 | get issue_number) 5 "second is next"
+        assert-equal ($sorted | get 2 | get issue_number) 10 "third is next"
+        assert-equal ($sorted | get 3 | get issue_number) 20 "fourth is highest"
+    })
+    (test "deterministic sort orders by repo then issue" {
+        let jobs = [
+            {issue_number: 10, repo: "b/repo"}
+            {issue_number: 5, repo: "a/repo"}
+            {issue_number: 10, repo: "a/repo"}
+        ]
+        let sorted = (watch-deterministic-sort $jobs)
+        assert-equal ($sorted | get 0 | get repo) "a/repo" "first is a/repo"
+        assert-equal ($sorted | get 0 | get issue_number) 5 "first issue is 5"
+        assert-equal ($sorted | get 1 | get issue_number) 10 "second issue is 10"
+        assert-equal ($sorted | get 2 | get repo) "b/repo" "third is b/repo"
+    })
+    (test "deterministic sort handles empty list" {
+        let sorted = (watch-deterministic-sort [])
+        assert-equal ($sorted | length) 0 "empty list stays empty"
+    })
+    (test "deterministic sort preserves all fields" {
+        let jobs = [{issue_number: 5, repo: "a/repo", title: "test"}]
+        let sorted = (watch-deterministic-sort $jobs)
+        assert-equal ($sorted | get 0 | get title) "test" "title preserved"
+    })
+    # --- manifest includes depends_on ---
+    (test "flight manifest stores depends_on" {
+        let job_id = "dep-manifest-001"
+        let manifest = {job_id: $job_id, repo: "test/repo", depends_on: [41, 42]}
+        flight-write-manifest $job_id $manifest
+        let read_back = (flight-read-manifest $job_id)
+        assert-equal ($read_back.depends_on | length) 2 "deps preserved"
+        assert-equal ($read_back.depends_on | get 0) 41 "first dep preserved"
+        assert-equal ($read_back.depends_on | get 1) 42 "second dep preserved"
+    })
+    (test "flight manifest stores empty depends_on" {
+        let job_id = "dep-manifest-002"
+        let manifest = {job_id: $job_id, repo: "test/repo", depends_on: []}
+        flight-write-manifest $job_id $manifest
+        let read_back = (flight-read-manifest $job_id)
+        assert-equal ($read_back.depends_on | length) 0 "empty deps preserved"
+    })
+    # --- admission with dependencies ---
+    (test "admission with no deps returns ok without waiting" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard"}
+        let jobspec = (normalize-jobspec $fm "alice/repo" 10 "Test" "alice")
+        assert-equal ($jobspec.depends_on | length) 0 "no deps"
+    })
+    (test "admission with deps returns waiting when unmet" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard", depends_on: "[41]"}
+        let jobspec = (normalize-jobspec $fm "alice/repo" 10 "Test" "alice")
+        assert-equal ($jobspec.depends_on | length) 1 "one dep"
+        assert-equal ($jobspec.depends_on | get 0) 41 "dep is 41"
+    })
+    (test "self-dependency is rejected by validate-depends-on" {
+        let result = (validate-depends-on [10] 10 "alice/repo")
+        assert (not $result.ok) "self-dep rejected"
+        assert ($result.reason | str contains "self") "reason mentions self"
+    })
+    # --- cycle detection (trivial self-reference) ---
+    (test "self-dependency on any issue number is rejected" {
+        for num in [1 5 42 100] {
+            let result = (validate-depends-on [$num] $num "repo")
+            assert (not $result.ok) $"self-dep #($num) rejected"
+        }
+    })
+    # --- multiple dependencies ---
+    (test "validate-depends-on accepts multiple valid deps" {
+        let result = (validate-depends-on [1 2 3 100] 50 "repo")
+        assert $result.ok "multiple valid deps accepted"
+    })
+    (test "validate-depends-on rejects first invalid dep in list" {
+        let result = (validate-depends-on [1 50 3] 50 "repo")
+        assert (not $result.ok) "self-dep in middle rejected"
+        assert ($result.reason | str contains "50") "reason mentions the self issue"
+    })
+    # --- version bump ---
+    (test "version is 0.2.5" {
+        let ver = (open ($project_root | path join "VERSION") | str trim)
+        assert-equal $ver "0.2.5" "version bumped"
     })
 ]
 
