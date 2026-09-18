@@ -1372,7 +1372,7 @@ let results = [
         let events = (flight-read-events $job_id)
         assert ($events | any {|e| $e.event == "claimed"}) "claimed event"
         assert ($events | any {|e| $e.event == "runner_start"}) "runner_start event"
-        assert ($events | any {|e| $e.event == "finalized"}) "finalized event"
+        assert ($events | any {|e| $e.event == "runner_complete"}) "runner_complete event"
     })
     (test "controller-runner writes result.json on clone failure" {
         let job_id = "ctrl-test-clone-fail"
@@ -1495,7 +1495,172 @@ let results = [
         let events = (flight-read-events $job_id)
         assert ($events | any {|e| $e.event == "closeout_start"}) "closeout_start event"
         assert ($events | any {|e| $e.event == "closeout_end"}) "closeout_end event"
-        assert ($events | any {|e| $e.event == "finalized"}) "finalized event after closeout"
+        assert ($events | any {|e| $e.event == "runner_complete"}) "runner_complete event after closeout"
+    })
+    # --- end-to-end launch seam tests ---
+    (test "controller-runner end-to-end: claim, spawn, result, reap, finalize, free slot" {
+        let fake_repo = ($test_root | path join "e2e-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "e2e-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let test_result = {
+            status: "completed"
+            exit_code: 0
+            tool_calls: 1
+            tool_failures: 0
+            changed_files: ["src/fix.nu"]
+            duration_seconds: 3
+            timed_out: false
+            final_text: "work done"
+            model: "mimo-v2.5"
+            backend: "opencode"
+            provider: "m2c-mimo"
+            session_id: null
+            workstream: null
+            packet: null
+            budget_minutes: 20
+            context_estimate_tokens: null
+            context_percent: null
+            checkpoint_recommended: false
+        }
+        let backend_file = ($test_root | path join "e2e-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        let job_id = "e2e-launch-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let jobspec = {
+            job_id: $job_id
+            repo: "local/e2e"
+            issue_number: 10
+            title: "E2E launch test"
+            base_sha: $base_sha
+            branch: "mimo/e2e-launch"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        let manifest = $jobspec | merge {resource_key: "local/e2e:mimo/e2e-launch", claimed_at: (iso-now-utc), m2c_version: "0.2.0", m2c_source_hash: "test"}
+        flight-write-manifest $job_id $manifest
+        flight-append-event $job_id {event: "claimed", repo: "local/e2e", issue: 10}
+        flight-append-event $job_id {event: "runner_start"}
+        let child_tag = (worker-mailbox-tag)
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let child_job = (job spawn --description "e2e test runner" {
+                let _r = (controller-runner $job_dir $jobspec "Do the E2E test work.")
+                {done: true} | job send 0 --tag $child_tag
+            })
+            let msg = (try { job recv --tag $child_tag --timeout 30sec } catch { null })
+            assert ($msg != null) "child runner sent completion message"
+        }
+        let result_record = (flight-read-result $job_id)
+        assert ($result_record != null) "result.json written by child runner"
+        assert-equal $result_record.job_id $job_id "result job_id"
+        assert-equal $result_record.repo "local/e2e" "result repo"
+        assert ($result_record.category in ["DONE" "DELIVERY_FAILED" "NO_CHANGES"]) "result category is valid"
+        assert ($result_record.completed_at | is-not-empty) "completed_at present"
+        let events = (flight-read-events $job_id)
+        assert ($events | any {|e| $e.event == "claimed"}) "claimed event recorded"
+        assert ($events | any {|e| $e.event == "runner_start"}) "runner_start event recorded"
+        assert ($events | any {|e| $e.event == "runner_complete"}) "runner_complete event recorded by child"
+        let job_record = {
+            job_id: $job_id
+            job_dir: $job_dir
+            jobspec: $jobspec
+            resource_key: "local/e2e:mimo/e2e-launch"
+            original_title: "E2E launch test"
+            admission: {ok: true, packet: "Do the E2E test work."}
+            started_at: (date now)
+            soft_deadline_ns: 999999999999
+            hard_deadline_ns: 999999999999
+            closeout_started: false
+            child_job: null
+            child_tag: $child_tag
+        }
+        controller-finalize-job $job_record $result_record
+        let events_after = (flight-read-events $job_id)
+        assert ($events_after | any {|e| $e.event == "finalized"}) "finalized event written by controller"
+        let final_events = ($events_after | where {|e| $e.event == "finalized"})
+        assert-equal ($final_events | length) 1 "finalized exactly once"
+    })
+    (test "controller-runner two concurrent jobs: distinct resources run in parallel" {
+        let fake_repo_1 = ($test_root | path join "e2e-repo-1")
+        mkdir $fake_repo_1
+        (run-external "git" "-C" $fake_repo_1 "init" "--bare" "-b" "main" | complete) | ignore
+        let work_1 = ($test_root | path join "e2e-work-1")
+        mkdir $work_1
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo_1 $work_1 | complete) | ignore
+        ("# init" | save --force ($work_1 | path join "README.md"))
+        (run-external "git" "-C" $work_1 "add" "." | complete) | ignore
+        (run-external "git" "-C" $work_1 "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work_1 "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha_1 = ((run-external "git" "-C" $work_1 "rev-parse" "HEAD" | complete).stdout | str trim)
+        let fake_repo_2 = ($test_root | path join "e2e-repo-2")
+        mkdir $fake_repo_2
+        (run-external "git" "-C" $fake_repo_2 "init" "--bare" "-b" "main" | complete) | ignore
+        let work_2 = ($test_root | path join "e2e-work-2")
+        mkdir $work_2
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo_2 $work_2 | complete) | ignore
+        ("# init" | save --force ($work_2 | path join "README.md"))
+        (run-external "git" "-C" $work_2 "add" "." | complete) | ignore
+        (run-external "git" "-C" $work_2 "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work_2 "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha_2 = ((run-external "git" "-C" $work_2 "rev-parse" "HEAD" | complete).stdout | str trim)
+        let backend_1 = ($test_root | path join "e2e-backend-1.json")
+        {status: "completed", exit_code: 0, tool_calls: 1, tool_failures: 0, changed_files: ["a.nu"], duration_seconds: 2, timed_out: false, final_text: "done1", model: "mimo-v2.5", backend: "opencode", provider: "m2c-mimo", session_id: null, workstream: null, packet: null, budget_minutes: 20, context_estimate_tokens: null, context_percent: null, checkpoint_recommended: false} | to json -r | save --force $backend_1
+        let backend_2 = ($test_root | path join "e2e-backend-2.json")
+        {status: "completed", exit_code: 0, tool_calls: 1, tool_failures: 0, changed_files: ["b.nu"], duration_seconds: 2, timed_out: false, final_text: "done2", model: "mimo-v2.5", backend: "opencode", provider: "m2c-mimo", session_id: null, workstream: null, packet: null, budget_minutes: 20, context_estimate_tokens: null, context_percent: null, checkpoint_recommended: false} | to json -r | save --force $backend_2
+        let job_id_1 = "e2e-concurrent-1"
+        let job_dir_1 = ($test_root | path join $"watch-($job_id_1)")
+        mkdir $job_dir_1
+        let jobspec_1 = {job_id: $job_id_1, repo: "alice/repo-a", issue_number: 1, title: "Job A", base_sha: $base_sha_1, branch: "mimo/job-a", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        let job_id_2 = "e2e-concurrent-2"
+        let job_dir_2 = ($test_root | path join $"watch-($job_id_2)")
+        mkdir $job_dir_2
+        let jobspec_2 = {job_id: $job_id_2, repo: "bob/repo-b", issue_number: 2, title: "Job B", base_sha: $base_sha_2, branch: "mimo/job-b", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        let tag_1 = (worker-mailbox-tag)
+        let tag_2 = (worker-mailbox-tag)
+        flight-write-manifest $job_id_1 {job_id: $job_id_1, repo: "alice/repo-a", resource_key: "alice/repo-a:mimo/job-a"}
+        flight-write-manifest $job_id_2 {job_id: $job_id_2, repo: "bob/repo-b", resource_key: "bob/repo-b:mimo/job-b"}
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_1, M2C_TEST_REPO_ROOT: $fake_repo_1} {
+            let _h1 = (job spawn --description "e2e concurrent 1" {
+                let _r = (controller-runner $job_dir_1 $jobspec_1 "Job A work")
+                {done: true} | job send 0 --tag $tag_1
+            })
+        }
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_2, M2C_TEST_REPO_ROOT: $fake_repo_2} {
+            let _h2 = (job spawn --description "e2e concurrent 2" {
+                let _r = (controller-runner $job_dir_2 $jobspec_2 "Job B work")
+                {done: true} | job send 0 --tag $tag_2
+            })
+        }
+        let msg_1 = (try { job recv --tag $tag_1 --timeout 30sec } catch { null })
+        assert ($msg_1 != null) "job 1 completed"
+        let msg_2 = (try { job recv --tag $tag_2 --timeout 30sec } catch { null })
+        assert ($msg_2 != null) "job 2 completed"
+        let result_1 = (flight-read-result $job_id_1)
+        let result_2 = (flight-read-result $job_id_2)
+        assert ($result_1 != null) "job 1 result written"
+        assert ($result_2 != null) "job 2 result written"
+        assert ($result_1.category in ["DONE" "DELIVERY_FAILED" "NO_CHANGES"]) "job 1 category valid"
+        assert ($result_2.category in ["DONE" "DELIVERY_FAILED" "NO_CHANGES"]) "job 2 category valid"
+        assert (not ($result_1.job_id == $result_2.job_id)) "different job ids"
+        assert (not ($result_1.repo == $result_2.repo)) "different repos"
+    })
+    (test "same resource key cannot run twice concurrently" {
+        let active = ["alice/repo:mimo/branch"]
+        let slot_check = (watch-slot-acquire $active "alice/repo:mimo/branch" 3)
+        assert (not $slot_check.ok) "same resource key blocked"
+        let slot_check_2 = (watch-slot-acquire $active "alice/repo:mimo/other" 3)
+        assert $slot_check_2.ok "different branch on same repo allowed"
     })
     # --- --jobs requires --stay ---
     (test "watch --jobs 2 without --stay is rejected" {
