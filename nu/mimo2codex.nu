@@ -559,13 +559,18 @@ def console-enabled [quiet: bool] {
 
 def render-console [frame: list<string> previous_lines: int = 0] {
     let esc = (char --integer 27)
-    if $previous_lines > 0 { print --stderr $"($esc)[($previous_lines)A" }
-    $frame | each {|line| print --stderr $"($esc)[2K($line)" }
+    mut buf = ""
+    if $previous_lines > 0 { $buf = $"($esc)[($previous_lines)A" }
+    for line in $frame { $buf = $"($buf)($esc)[2K($line)\n" }
+    print -n --stderr $buf
     $frame | length
 }
 
 def finish-console [enabled: bool previous_lines: int] {
-    if $enabled { let esc = (char --integer 27); print --stderr $"($esc)[?25h"; if $previous_lines > 0 { print --stderr "" } }
+    if $enabled {
+        let esc = (char --integer 27)
+        print -n --stderr $"($esc)[?25h"
+    }
 }
 
 def format-time-12h [dt: datetime] {
@@ -631,27 +636,41 @@ def live-panel-frame [state: record] {
     $lines
 }
 
-def live-render-panel [frame: list<string> previous_lines: int] {
+def live-build-panel-bytes [frame: list<string> previous_lines: int] {
     let esc = (char --integer 27)
     let new_count = ($frame | length)
-    if $previous_lines > 0 { print --stderr $"($esc)[($previous_lines)A" }
-    for line in $frame { print --stderr $"($esc)[2K($line)" }
+    mut buf = ""
+    if $previous_lines > 0 { $buf = $"($esc)[($previous_lines)A" }
+    for line in $frame { $buf = $"($buf)($esc)[2K($line)\n" }
     if $previous_lines > $new_count {
         let extra = ($previous_lines - $new_count)
-        for _ in 0..<$extra { print --stderr $"($esc)[2K" }
-        print --stderr $"($esc)[($extra)A"
+        for _ in 0..<$extra { $buf = $"($buf)($esc)[2K\n" }
+        $buf = $"($buf)($esc)[($extra)A"
     }
-    $new_count
+    {bytes: $buf, owned: $new_count}
+}
+
+def live-render-panel [frame: list<string> previous_lines: int] {
+    let result = (live-build-panel-bytes $frame $previous_lines)
+    print -n --stderr $result.bytes
+    $result.owned
+}
+
+def live-build-clear-bytes [previous_lines: int] {
+    if $previous_lines <= 0 {
+        {bytes: "", owned: 0}
+    } else {
+        let esc = (char --integer 27)
+        mut buf = $"($esc)[($previous_lines)A"
+        for _ in 0..<$previous_lines { $buf = $"($buf)($esc)[2K\n" }
+        $buf = $"($buf)($esc)[?25h"
+        {bytes: $buf, owned: 0}
+    }
 }
 
 def live-clear-panel [previous_lines: int] {
-    if $previous_lines > 0 {
-        let esc = (char --integer 27)
-        print --stderr $"($esc)[($previous_lines)A"
-        for _ in 0..<$previous_lines { print --stderr $"($esc)[2K" }
-        print --stderr $"($esc)[?25h"
-        print --stderr ""
-    }
+    let result = (live-build-clear-bytes $previous_lines)
+    if ($result.bytes | is-not-empty) { print -n --stderr $result.bytes }
 }
 
 def console-meaningful-event [event: any] {
@@ -786,7 +805,7 @@ def worker-run [model: string prompt: string workstream: any packet: any session
         if $console_on and $refresh {
             let frame = (console-frame $state (try { (term size).columns } catch { 80 }))
             let esc = (char --integer 27)
-            if $previous_lines == 0 { print --stderr $"($esc)[?25l" }
+            if $previous_lines == 0 { print -n --stderr $"($esc)[?25l" }
             $previous_lines = (render-console $frame $previous_lines)
             $last_render_at = (date now)
             $rendered_event_count = ($events | length)
@@ -1792,7 +1811,7 @@ def watch-command [args: list<string>] {
     mut pending_receipts = []
     if $tty_on {
         let esc = (char --integer 27)
-        print --stderr $"($esc)[?25l"
+        print -n --stderr $"($esc)[?25l"
     }
     try {
         while true {
@@ -2103,13 +2122,13 @@ def watch-command [args: list<string>] {
             if $tty_on and ($render_elapsed >= 6 or $panel_lines == 0) {
                 if ($pending_receipts | is-not-empty) {
                     if $panel_lines > 0 {
-                        let esc = (char --integer 27)
-                        print --stderr $"($esc)[($panel_lines)A"
-                        for _ in 0..<$panel_lines { print --stderr $"($esc)[2K" }
-                        print --stderr $"($esc)[($panel_lines)A"
+                        let clear_result = (live-build-clear-bytes $panel_lines)
+                        if ($clear_result.bytes | is-not-empty) { print -n --stderr $clear_result.bytes }
                         $panel_lines = 0
                     }
-                    for receipt in $pending_receipts { print --stderr $receipt }
+                    mut receipt_buf = ""
+                    for receipt in $pending_receipts { $receipt_buf = $"($receipt_buf)($receipt)\n" }
+                    print -n --stderr $receipt_buf
                     $pending_receipts = []
                 }
                 let state = (live-panel-state $active_jobs $max_slots $queued_count)
@@ -2129,7 +2148,7 @@ def watch-command [args: list<string>] {
         let err_msg = ($err.msg? | default "watch error")
         let err_detail = (try { $err | to json -r } catch { "" })
         let esc = (char --integer 27)
-        print --stderr $"($esc)[?25h"
+        print -n --stderr $"($esc)[?25h"
         controller-release-lock
         print --stderr $"Watch error: ($err_msg)"
         if ($err_detail | is-not-empty) {
