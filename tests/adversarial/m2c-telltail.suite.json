@@ -13,5 +13,7 @@
 {"id":"grep-verification","probe_kind":"route","situation":{},"choices":[{"id":"recognized","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"recognized","action":"record"}},
 {"id":"telemetry-order","probe_kind":"route","situation":{},"choices":[{"id":"ordered","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"ordered","action":"record"}},
 {"id":"live-cancel-proof","probe_kind":"route","situation":{},"choices":[{"id":"cancelled","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"cancelled","action":"preserve-state"}},
-{"id":"live-timeout-proof","probe_kind":"route","situation":{},"choices":[{"id":"timed_out","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"timed_out","action":"preserve-state"}}
+{"id":"live-timeout-proof","probe_kind":"route","situation":{},"choices":[{"id":"timed_out","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"timed_out","action":"preserve-state"}},
+{"id":"mailbox-tag-unique","probe_kind":"route","situation":{},"choices":[{"id":"unique","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"unique","action":"isolate"}},
+{"id":"mailbox-tag-range","probe_kind":"route","situation":{},"choices":[{"id":"valid","eligible":true,"sufficient":true},{"id":"wrong","eligible":false}],"assert":{"choice_id":"valid","action":"isolate"}}
 ],"relations":[]}

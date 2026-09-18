@@ -480,6 +480,7 @@ def worker-summary [events: list<any> model: string workstream: any packet: any 
 }
 
 def worker-job-id [] { random uuid | str replace --all "-" "" }
+def worker-mailbox-tag [] { random int 1..2147483647 }
 
 def watchdog-limit-ns [] {
     let override = ($env.M2C_TEST_WATCHDOG_MS? | default "" | str trim)
@@ -511,13 +512,14 @@ def worker-run [model: string prompt: string workstream: any packet: any session
     let started = (date now)
     let watchdog_ns = (watchdog-limit-ns)
     let watchdog_seconds = (($watchdog_ns / 1000000000) | math round | into int)
+    let mailbox_tag = (worker-mailbox-tag)
     let job = (job spawn --description $"m2c OpenCode worker ($model)" {
         with-env $environment {
             try {
                 run-external $opencode ...$command | save --force $raw_path
-                {exit_code: ($env.LAST_EXIT_CODE? | default 0)} | job send 0
+                {exit_code: ($env.LAST_EXIT_CODE? | default 0)} | job send 0 --tag $mailbox_tag
             } catch {
-                {exit_code: ($env.LAST_EXIT_CODE? | default 1)} | job send 0
+                {exit_code: ($env.LAST_EXIT_CODE? | default 1)} | job send 0 --tag $mailbox_tag
             }
         }
     })
@@ -547,7 +549,7 @@ def worker-run [model: string prompt: string workstream: any packet: any session
             $last_render_at = (date now)
             $rendered_event_count = ($events | length)
         }
-        let message = (try { job recv --timeout 0sec } catch { null })
+        let message = (try { job recv --tag $mailbox_tag --timeout 0sec } catch { null })
         if $message != null {
             $finished = {exit_code: ($message.exit_code? | default 1), timed_out: false, cancelled: false}
             $done = true

@@ -16,6 +16,8 @@ let decision = (match $request.case_id {
     "telemetry-order" => {action: "record", choice_id: (if (let started = (date now); let ms = ((($started | into int) / 1000000) | math round | into int); let rows = (telemetry-derived [{type: "tool_use", timestamp: ($ms + 3000), part: {tool: "bash", state: {status: "completed", input: {command: "cargo test"}}}} {type: "tool_use", timestamp: ($ms + 2000), part: {tool: "edit", state: {status: "completed", input: {filePath: "a"}}}}] $started ($started + 4sec)).records; $rows.1.t == 2.0) { "ordered" } else { "wrong" }), reason_codes: ["chronological"]}
     "live-cancel-proof" => {action: "preserve-state", choice_id: (if (worker-summary [] "mimo-v2.5" null null 1 130 false true).status == "cancelled" { "cancelled" } else { "wrong" }), reason_codes: ["live_cancel_evidence"]}
     "live-timeout-proof" => {action: "preserve-state", choice_id: (if (worker-summary [] "mimo-v2.5" null null 1 124 true false).status == "timed_out" { "timed_out" } else { "wrong" }), reason_codes: ["live_timeout_evidence"]}
+    "mailbox-tag-unique" => {action: "isolate", choice_id: (if ((worker-mailbox-tag) != (worker-mailbox-tag)) { "unique" } else { "wrong" }), reason_codes: ["tag_isolation"]}
+    "mailbox-tag-range" => {action: "isolate", choice_id: (let t = (worker-mailbox-tag); if ($t >= 1) and ($t <= 2147483647) { "valid" } else { "wrong" }), reason_codes: ["tag_range"]}
     _ => {action: "reject", choice_id: "wrong", reason_codes: ["unknown_case"]}
 })
 $decision | insert case_id $request.case_id | insert schema "telltail.decision.v1" | to json -r
