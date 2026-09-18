@@ -2584,6 +2584,259 @@ let results = [
         assert-equal $result.category "INTERNAL_ERROR" "category is INTERNAL_ERROR"
         assert-equal $result.failure_signature "runner_exception" "failure signature is runner_exception"
     })
+    # --- live panel: format-time-12h ---
+    (test "format-time-12h renders morning time" {
+        let dt = ({year: 2026, month: 1, day: 1, hour: 9, minute: 36, second: 0} | into datetime)
+        assert-equal (format-time-12h $dt) "9:36 am" "morning time"
+    })
+    (test "format-time-12h renders afternoon time" {
+        let dt = ({year: 2026, month: 1, day: 1, hour: 15, minute: 36, second: 0} | into datetime)
+        assert-equal (format-time-12h $dt) "3:36 pm" "afternoon time"
+    })
+    (test "format-time-12h renders midnight" {
+        let dt = ({year: 2026, month: 1, day: 1, hour: 0, minute: 5, second: 0} | into datetime)
+        assert-equal (format-time-12h $dt) "12:05 am" "midnight"
+    })
+    (test "format-time-12h renders noon" {
+        let dt = ({year: 2026, month: 1, day: 1, hour: 12, minute: 0, second: 0} | into datetime)
+        assert-equal (format-time-12h $dt) "12:00 pm" "noon"
+    })
+    # --- live panel: format-elapsed-compact ---
+    (test "format-elapsed-compact renders seconds" {
+        assert-equal (format-elapsed-compact 7) "0m 07s" "7 seconds"
+    })
+    (test "format-elapsed-compact renders minutes and seconds" {
+        assert-equal (format-elapsed-compact 738) "12m 18s" "12m 18s"
+    })
+    (test "format-elapsed-compact renders zero" {
+        assert-equal (format-elapsed-compact 0) "0m 00s" "zero"
+    })
+    (test "format-elapsed-compact renders large values" {
+        assert-equal (format-elapsed-compact 3661) "61m 01s" "61m 01s"
+    })
+    # --- live panel: live-panel-state ---
+    (test "live-panel-state builds correct snapshot with no jobs" {
+        let state = (live-panel-state [] 3 0)
+        assert-equal ($state.active | length) 0 "no active jobs"
+        assert-equal $state.queued 0 "no queued"
+        assert-equal $state.free 3 "3 free slots"
+        assert-equal $state.max_slots 3 "max 3"
+    })
+    (test "live-panel-state derives free capacity from max minus active" {
+        let now = (date now)
+        let job1 = {job_id: "j1", original_title: "Job A", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r1:b1", job_dir: "/tmp/j1", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job1] 3 2)
+        assert-equal ($state.active | length) 1 "one active"
+        assert-equal $state.free 2 "2 free slots"
+        assert-equal $state.queued 2 "2 queued"
+    })
+    (test "live-panel-state shows WORKING phase when not in closeout" {
+        let now = (date now)
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "pro"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        assert-equal ($state.active.0.phase) "WORKING" "working phase"
+    })
+    (test "live-panel-state shows CLOSEOUT phase when in closeout" {
+        let now = (date now)
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: true, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        assert-equal ($state.active.0.phase) "CLOSEOUT" "closeout phase"
+    })
+    (test "live-panel-state derives MiMo Pro profile display" {
+        let now = (date now)
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "pro"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        assert-equal ($state.active.0.profile) "MiMo Pro" "pro profile"
+    })
+    (test "live-panel-state derives MiMo Standard profile display" {
+        let now = (date now)
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        assert-equal ($state.active.0.profile) "MiMo Standard" "standard profile"
+    })
+    (test "live-panel-state elapsed is derived from actual started_at" {
+        let started = ((date now) - 738sec)
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $started, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        assert ($state.active.0.elapsed_seconds >= 737) "elapsed at least 737s"
+        assert ($state.active.0.elapsed_seconds <= 740) "elapsed at most 740s"
+    })
+    (test "live-panel-state closeout and deadline are derived from actual timestamps" {
+        let started = (date now)
+        let budget_minutes = 20
+        let soft_ns = (soft-deadline-ns $budget_minutes)
+        let hard_ns = (watchdog-limit-from-budget $budget_minutes)
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $started, soft_deadline_ns: $soft_ns, hard_deadline_ns: $hard_ns, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        let expected_soft = ($started + ($soft_ns / 1000000000 | math round | into int | into duration --unit sec))
+        let expected_hard = ($started + ($hard_ns / 1000000000 | math round | into int | into duration --unit sec))
+        let closeout_diff = (($state.active.0.closeout_at - $expected_soft) | into int | math abs)
+        assert ($closeout_diff < 2000000000) "closeout time within 2s of expected"
+        let deadline_diff = (($state.active.0.deadline_at - $expected_hard) | into int | math abs)
+        assert ($deadline_diff < 2000000000) "deadline time within 2s of expected"
+    })
+    # --- live panel: live-panel-frame ---
+    (test "live-panel-frame header contains version and counts" {
+        let state = {active: [], queued: 1, free: 3, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        assert (($frame | first) | str contains "watching") "header contains watching"
+        assert (($frame | first) | str contains "0 active") "header shows 0 active"
+        assert (($frame | first) | str contains "1 queued") "header shows 1 queued"
+        assert (($frame | first) | str contains "0.2.3") "header contains version"
+    })
+    (test "live-panel-frame shows active job details" {
+        let now = (date now)
+        let job = {title: "Fix auth bug", profile: "MiMo Pro", phase: "WORKING", elapsed_seconds: 738, closeout_at: ($now + 600sec), deadline_at: ($now + 900sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now}
+        let frame = (live-panel-frame $state)
+        let text = ($frame | str join "\n")
+        assert ($text | str contains "Fix auth bug") "title present"
+        assert ($text | str contains "MiMo Pro") "profile present"
+        assert ($text | str contains "WORKING") "phase present"
+        assert ($text | str contains "12m 18s") "elapsed present"
+        assert ($text | str contains "closeout") "closeout label"
+        assert ($text | str contains "deadline") "deadline label"
+    })
+    (test "live-panel-frame shows CLOSEOUT symbol for closeout phase" {
+        let now = (date now)
+        let job = {title: "Test", profile: "MiMo Standard", phase: "CLOSEOUT", elapsed_seconds: 100, closeout_at: $now, deadline_at: ($now + 60sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now}
+        let frame = (live-panel-frame $state)
+        let text = ($frame | str join "\n")
+        assert ($text | str contains "◐") "closeout symbol present"
+        assert ($text | str contains "CLOSEOUT") "closeout label present"
+    })
+    (test "live-panel-frame shows WORKING symbol for working phase" {
+        let now = (date now)
+        let job = {title: "Test", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 100, closeout_at: $now, deadline_at: ($now + 60sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now}
+        let frame = (live-panel-frame $state)
+        let text = ($frame | str join "\n")
+        assert ($text | str contains "●") "working symbol present"
+    })
+    (test "live-panel-frame footer shows queued and free slots" {
+        let state = {active: [], queued: 2, free: 1, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let last = ($frame | last)
+        assert ($last | str contains "2 queued") "queued count"
+        assert ($last | str contains "1 slot free") "singular slot"
+    })
+    (test "live-panel-frame footer uses plural slots when free != 1" {
+        let state = {active: [], queued: 0, free: 2, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let last = ($frame | last)
+        assert ($last | str contains "2 slots free") "plural slots"
+    })
+    (test "live-panel-frame footer uses singular slot when free == 1" {
+        let state = {active: [], queued: 0, free: 1, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let last = ($frame | last)
+        assert ($last | str contains "1 slot free") "singular slot"
+    })
+    # --- live panel: frame height stability ---
+    (test "live-panel-frame height is bounded per active job" {
+        let now = (date now)
+        let jobs = (0..2 | each {|i|
+            {title: $"Job ($i)", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 60, closeout_at: $now, deadline_at: $now}
+        })
+        let state = {active: $jobs, queued: 0, free: 0, max_slots: 3, now: $now}
+        let frame = (live-panel-frame $state)
+        let lines_per_job = 4
+        let header_lines = 2
+        let footer_lines = 1
+        let expected = $header_lines + (3 * $lines_per_job) + $footer_lines
+        assert-equal ($frame | length) $expected "frame height matches expected"
+    })
+    # --- live panel: no fake telemetry ---
+    (test "live-panel-state has no percentage complete" {
+        let now = (date now)
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        let active = ($state.active.0)
+        assert (not ($active | columns | any {|c| $c == "percent"})) "no percent field"
+        assert (not ($active | columns | any {|c| $c == "eta"})) "no eta field"
+        assert (not ($active | columns | any {|c| $c == "progress"})) "no progress field"
+    })
+    (test "live-panel-frame contains no percentage or ETA" {
+        let now = (date now)
+        let job = {title: "Test", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 100, closeout_at: $now, deadline_at: ($now + 60sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now}
+        let frame = (live-panel-frame $state)
+        let text = ($frame | str join "\n")
+        assert (not ($text | str contains "%")) "no percentage"
+        assert (not ($text | str contains "ETA")) "no ETA"
+        assert (not ($text | str contains "estimated")) "no estimated"
+    })
+    # --- live panel: phase labels only from mechanical state ---
+    (test "live-panel-state phase is only WORKING or CLOSEOUT" {
+        let now = (date now)
+        let working = {job_id: "j1", original_title: "T", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let closeout = ($working | merge {closeout_started: true})
+        let s1 = (live-panel-state [$working] 3 0)
+        let s2 = (live-panel-state [$closeout] 3 0)
+        assert-equal ($s1.active.0.phase) "WORKING" "working from closeout_started=false"
+        assert-equal ($s2.active.0.phase) "CLOSEOUT" "closeout from closeout_started=true"
+    })
+    # --- live panel: cadence isolation ---
+    (test "live-tty-enabled returns false when quiet" {
+        assert (not (live-tty-enabled true)) "quiet disables tty"
+    })
+    (test "live-tty-enabled respects M2C_FORCE_TTY" {
+        with-env {M2C_FORCE_TTY: "1"} {
+            assert (live-tty-enabled false) "force tty enables"
+        }
+    })
+    # --- live panel: render produces correct line count ---
+    (test "live-render-panel returns new line count" {
+        let frame = ["line1" "line2" "line3"]
+        let result = (live-render-panel $frame 0)
+        assert-equal $result 3 "returns frame length"
+    })
+    # --- live panel: no repeated horizontal rules ---
+    (test "live-panel-frame contains no horizontal rules" {
+        let state = {active: [], queued: 0, free: 3, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let text = ($frame | str join "\n")
+        assert (not ($text | str contains "───")) "no horizontal rules"
+        assert (not ($text | str contains "===")) "no double rules"
+        assert (not ($text | str contains "---")) "no dash rules"
+    })
+    # --- live panel: narrow terminal degrades ---
+    (test "live-panel-frame produces valid output regardless of terminal width" {
+        let now = (date now)
+        let job = {title: "A very long job title that might overflow narrow terminals", profile: "MiMo Pro", phase: "WORKING", elapsed_seconds: 100, closeout_at: $now, deadline_at: ($now + 60sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now}
+        let frame = (live-panel-frame $state)
+        assert (($frame | length) > 0) "frame is non-empty"
+        for line in $frame {
+            assert (($line | describe) == "string") "each line is a string"
+        }
+    })
+    # --- live panel: version value is 0.2.3 ---
+    (test "version-value returns 0.2.3" {
+        assert-equal (version-value) "0.2.3" "version bumped"
+    })
+    # --- live panel: queue count reflects controller truth ---
+    (test "live-panel-state queued count passes through from controller" {
+        let state = (live-panel-state [] 3 5)
+        assert-equal $state.queued 5 "queued count preserved"
+        let state2 = (live-panel-state [] 3 0)
+        assert-equal $state2.queued 0 "zero queued preserved"
+    })
+    # --- live panel: free slot math ---
+    (test "live-panel-state free slots is max minus active count" {
+        let now = (date now)
+        let make_job = {|id|
+            {job_id: $id, original_title: $"Job ($id)", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: $"r($id):b($id)", job_dir: $"/tmp/($id)", child_job: null, child_tag: 1, admission: {}}
+        }
+        let j1 = (do $make_job "a")
+        let j2 = (do $make_job "b")
+        let j3 = (do $make_job "c")
+        assert-equal (live-panel-state [] 3 0).free 3 "0 jobs = 3 free"
+        assert-equal (live-panel-state [$j1] 3 0).free 2 "1 job = 2 free"
+        assert-equal (live-panel-state [$j1 $j2] 3 0).free 1 "2 jobs = 1 free"
+        assert-equal (live-panel-state [$j1 $j2 $j3] 3 0).free 0 "3 jobs = 0 free"
+    })
 ]
 
 print ($results | table)
