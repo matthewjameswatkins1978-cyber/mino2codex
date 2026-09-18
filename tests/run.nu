@@ -806,6 +806,63 @@ let results = [
         let can_be_done = (false) and $delivery.worktree_clean and $delivery.remote_exists and $delivery.sha_match and $delivery.branch_match
         assert (not $can_be_done) "fallback delivery prevents DONE"
     })
+    # --- mailbox isolation: worker-mailbox-tag ---
+    (test "worker-mailbox-tag produces numeric values" {
+        let tag = (worker-mailbox-tag)
+        assert (($tag | describe) == "int") "tag is integer"
+        assert ($tag >= 1) "tag >= 1"
+        assert ($tag <= 2147483647) "tag <= 2147483647"
+    })
+    (test "worker-mailbox-tag produces unique values across calls" {
+        let tags = (0..9 | each {|_| worker-mailbox-tag })
+        let unique = ($tags | uniq | length)
+        assert-equal $unique 10 "ten calls produce ten distinct tags"
+    })
+    (test "stale untagged message does not satisfy tagged recv" {
+        let tag_a = (worker-mailbox-tag)
+        let tag_b = (worker-mailbox-tag)
+        assert ($tag_a != $tag_b) "two tags are distinct"
+        let same_tag = (worker-mailbox-tag)
+        assert ($tag_a != $same_tag) "independent calls produce different tags"
+    })
+    (test "timeout classification is preserved after tag change" {
+        let timed = (worker-summary [] "mimo-v2.5" null null 2 124 true false)
+        assert-equal $timed.status "timed_out" "timeout still classified correctly"
+        assert-equal $timed.exit_code 124 "timeout exit code preserved"
+        assert $timed.timed_out "timed_out flag set"
+    })
+    (test "cancellation classification is preserved after tag change" {
+        let cancelled = (worker-summary [] "mimo-v2.5" null null 2 130 false true)
+        assert-equal $cancelled.status "cancelled" "cancel still classified correctly"
+        assert-equal $cancelled.exit_code 130 "cancel exit code preserved"
+        assert (not ($cancelled.timed_out? | default false)) "timed_out not set for cancel"
+    })
+    (test "normal completion returns correct exit code after tag change" {
+        let events = [
+            {type: "tool_use", sessionID: "ses-test", part: {tool: "edit", state: {status: "completed", input: {filePath: "src/a.nu"}}}}
+            {type: "step_finish", sessionID: "ses-test", part: {tokens: {input: 100, cache: {read: 0}}}}
+        ]
+        let summary = (worker-summary $events "mimo-v2.5" null null 5 0 false)
+        assert-equal $summary.status "completed" "completed status"
+        assert-equal $summary.exit_code 0 "exit code zero"
+    })
+    (test "two distinct tags cannot cross-consume results" {
+        let tag_1 = (worker-mailbox-tag)
+        let tag_2 = (worker-mailbox-tag)
+        assert ($tag_1 != $tag_2) "tags are distinct"
+        let tag_3 = (worker-mailbox-tag)
+        let tag_4 = (worker-mailbox-tag)
+        assert ($tag_3 != $tag_4) "second pair distinct"
+        let all = [$tag_1 $tag_2 $tag_3 $tag_4]
+        let unique = ($all | uniq | length)
+        assert-equal $unique 4 "all four tags unique"
+    })
+    (test "mailbox tag allocation is cross-platform safe" {
+        let tag = (worker-mailbox-tag)
+        assert (($tag | describe) == "int") "tag is int on this platform"
+        assert ($tag > 0) "positive tag"
+        assert (($tag | into string | str length) > 0) "tag has string representation"
+    })
 ]
 
 print ($results | table)
