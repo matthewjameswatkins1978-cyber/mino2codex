@@ -970,7 +970,7 @@ def watch-gh-parse-front-matter [body: string] {
         if ($closing == null) { null } else {
             mut result = {}
             for line in ($lines | skip 1 | first ($closing.index - 1)) {
-                let match = ($line | parse --regex '^(?<key>[a-zA-Z0-9_]+)\s*:\s*(?<value>.+)$')
+                let match = ($line | parse --regex '^(?<key>[a-zA-Z0-9_]+)\s*:\s*(?<value>.*)$')
                 if (($match | length) > 0) {
                     let key = ($match.0.key | str trim)
                     let value = ($match.0.value | str trim)
@@ -1022,7 +1022,7 @@ def watch-parse-model [value: string] {
 def watch-parse-budget [value: any] {
     if ($value == null) or (($value | describe) == "nothing") { {ok: true, budget: 20} } else {
         let str_val = ($value | into string | str trim | str trim --char '"')
-        if ($str_val | is-empty) { {ok: true, budget: 20} } else {
+        if ($str_val | is-empty) { {ok: false, reason: "budget_minutes must be an integer, got empty value"} } else {
             if ($str_val | str contains ".") { {ok: false, reason: $"budget_minutes must be an integer, got fractional: ($str_val)"} } else {
                 let int_val = (try { $str_val | into int } catch { null })
                 if ($int_val == null) { {ok: false, reason: $"budget_minutes must be an integer, got: ($str_val)"} } else {
