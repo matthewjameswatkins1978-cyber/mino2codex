@@ -568,6 +568,92 @@ def finish-console [enabled: bool previous_lines: int] {
     if $enabled { let esc = (char --integer 27); print --stderr $"($esc)[?25h"; if $previous_lines > 0 { print --stderr "" } }
 }
 
+def format-time-12h [dt: datetime] {
+    let rec = ($dt | into record)
+    let h24 = ($rec.hour)
+    let m = ($rec.minute | fill -a right -w 2 -c '0')
+    let period = (if $h24 >= 12 { "pm" } else { "am" })
+    let h12 = (if $h24 == 0 { 12 } else if $h24 > 12 { $h24 - 12 } else { $h24 })
+    $"($h12):($m) ($period)"
+}
+
+def format-elapsed-compact [seconds: int] {
+    let m = ($seconds // 60)
+    let s = ($seconds mod 60)
+    $"($m)m ($s | fill -a right -w 2 -c '0')s"
+}
+
+def live-tty-enabled [quiet: bool] {
+    if $quiet { false } else if (($env.M2C_FORCE_TTY? | default "") == "1") { true } else {
+        try { let size = (term size); $size.columns > 0 } catch { false }
+    }
+}
+
+def live-panel-state [active_jobs: list max_slots: int queued_count: int] {
+    let now = (date now)
+    let active = ($active_jobs | each {|job|
+        let elapsed_ns = (($now - $job.started_at) | into int)
+        let elapsed_s = (($elapsed_ns / 1000000000) | math round | into int)
+        let soft_s = (($job.soft_deadline_ns / 1000000000) | math round | into int)
+        let hard_s = (($job.hard_deadline_ns / 1000000000) | math round | into int)
+        let closeout_wall = ($job.started_at + ($soft_s | into duration --unit sec))
+        let deadline_wall = ($job.started_at + ($hard_s | into duration --unit sec))
+        {
+            title: $job.original_title
+            profile: (if $job.jobspec.profile == "pro" { "MiMo Pro" } else { "MiMo Standard" })
+            phase: (if $job.closeout_started { "CLOSEOUT" } else { "WORKING" })
+            elapsed_seconds: $elapsed_s
+            closeout_at: $closeout_wall
+            deadline_at: $deadline_wall
+        }
+    })
+    let free = ($max_slots - ($active | length))
+    {active: $active, queued: $queued_count, free: $free, max_slots: $max_slots, now: $now}
+}
+
+def live-panel-frame [state: record] {
+    let ver = (version-value)
+    let active_count = ($state.active | length)
+    let header = $"m2c ($ver) · watching · ($active_count) active · ($state.queued) queued"
+    mut lines = [$header ""]
+    for job in $state.active {
+        let symbol = (if $job.phase == "CLOSEOUT" { "◐" } else { "●" })
+        let elapsed_str = (format-elapsed-compact $job.elapsed_seconds)
+        $lines = ($lines | append $"  ($symbol) ($job.title) ($job.profile)")
+        $lines = ($lines | append $"    ($job.phase)  ($elapsed_str) elapsed")
+        let closeout_str = (format-time-12h $job.closeout_at)
+        let deadline_str = (format-time-12h $job.deadline_at)
+        $lines = ($lines | append $"    closeout ($closeout_str) · deadline ($deadline_str)")
+        $lines = ($lines | append "")
+    }
+    let slot_word = (if $state.free != 1 { "slots" } else { "slot" })
+    $lines = ($lines | append $"  · ($state.queued) queued · ($state.free) ($slot_word) free")
+    $lines
+}
+
+def live-render-panel [frame: list<string> previous_lines: int] {
+    let esc = (char --integer 27)
+    let new_count = ($frame | length)
+    if $previous_lines > 0 { print --stderr $"($esc)[($previous_lines)A" }
+    for line in $frame { print --stderr $"($esc)[2K($line)" }
+    if $previous_lines > $new_count {
+        let extra = ($previous_lines - $new_count)
+        for _ in 0..<$extra { print --stderr $"($esc)[2K" }
+        print --stderr $"($esc)[($extra)A"
+    }
+    $new_count
+}
+
+def live-clear-panel [previous_lines: int] {
+    if $previous_lines > 0 {
+        let esc = (char --integer 27)
+        print --stderr $"($esc)[($previous_lines)A"
+        for _ in 0..<$previous_lines { print --stderr $"($esc)[2K" }
+        print --stderr $"($esc)[?25h"
+        print --stderr ""
+    }
+}
+
 def console-meaningful-event [event: any] {
     let tool = (telemetry-tool $event)
     let status = ($event.part?.state?.status? | default "")
@@ -1495,9 +1581,13 @@ def controller-closeout-runner [clone_dir: path job: record closeout_budget_minu
 }
 
 def controller-finalize-job [job_record: record result_record: record] {
+    let existing_events = (try { flight-read-events $job_record.job_id } catch { [] })
+    if ($existing_events | any {|event| $event.event? == "finalized"}) { return }
     let final_status = $result_record.category
     let final_title = $"[M2C ($final_status)] ($job_record.original_title)"
-    watch-update-title $job_record.jobspec.repo $job_record.jobspec.issue_number $final_title
+    try { watch-update-title $job_record.jobspec.repo $job_record.jobspec.issue_number $final_title } catch {|err|
+        try { flight-append-event $job_record.job_id {event: "finalize_warning", operation: "title", error: ($err.msg? | default "title update failed")} } catch { }
+    }
     let summary_status = (if ($result_record.timed_out? | default false) { "timed_out" } else if ($result_record.cancelled? | default false) { "cancelled" } else if ($result_record.exit_code == 0) { "completed" } else { "failed" })
     let summary = {
         status: $summary_status
@@ -1513,8 +1603,21 @@ def controller-finalize-job [job_record: record result_record: record] {
         branch_match: ($result_record.branch_match? | default false)
     }
     let comment = (watch-build-result-comment $summary $delivery $job_record.jobspec.profile $final_status $job_record.jobspec.budget_minutes)
-    watch-add-comment $job_record.jobspec.repo $job_record.jobspec.issue_number $comment
-    flight-append-event $job_record.job_id {event: "finalized", category: $final_status, failure_signature: ($result_record.failure_signature? | default null)}
+    try { watch-add-comment $job_record.jobspec.repo $job_record.jobspec.issue_number $comment } catch {|err|
+        try { flight-append-event $job_record.job_id {event: "finalize_warning", operation: "comment", error: ($err.msg? | default "comment failed")} } catch { }
+    }
+    try { flight-append-event $job_record.job_id {event: "finalized", category: $final_status, failure_signature: ($result_record.failure_signature? | default null)} } catch { }
+}
+
+def controller-raise-watch-error [err: any] {
+    let err_msg = ($err.msg? | default "watch error")
+    let span = ($err.span? | default null)
+    let has_record_span = (try { ($span | describe) == "record" } catch { false })
+    if $has_record_span {
+        error make {msg: $err_msg, label: {text: "watch controller error", span: $span}}
+    } else {
+        error make {msg: $err_msg}
+    }
 }
 
 def watch-run-worker-in-job [job_dir: path job: record] {
@@ -1653,16 +1756,32 @@ def watch-command [args: list<string>] {
     if (not $lock.ok) { print $lock.reason; return }
     controller-write-lock $max_slots
     let login = (try { watch-gh-login } catch {|err| controller-release-lock; error make {msg: ($err.msg? | default "gh auth failed")}})
-    print $"(startup-identity) · watcher"
-    print $"Watching as ($login). Slots: ($max_slots). Polling every 12 seconds."
+    let tty_on = (live-tty-enabled false)
+    if not $tty_on {
+        print $"(startup-identity) · watcher"
+        print $"Watching as ($login). Slots: ($max_slots). Polling every 12 seconds."
+    }
     mut active_jobs = []
     mut iterations = 0
+    mut queued_count = 0
+    mut last_poll_at = ((date now) - 20sec)
+    mut last_panel_render_at = ((date now) - 10sec)
+    mut panel_lines = 0
+    mut pending_receipts = []
+    if $tty_on {
+        let esc = (char --integer 27)
+        print --stderr $"($esc)[?25l"
+    }
     try {
         while true {
             $iterations = $iterations + 1
             let available_slots = ($max_slots - ($active_jobs | length))
-            if $available_slots > 0 {
+            let now_poll = (date now)
+            let poll_elapsed = (((($now_poll - $last_poll_at) | into int) / 1000000000) | math round | into int)
+            if $available_slots > 0 and ($poll_elapsed >= 12) {
+                $last_poll_at = $now_poll
                 let jobs = (watch-gh-find-job $login)
+                $queued_count = ($jobs | length)
                 mut admitted = 0
                 for job in $jobs {
                     if $admitted >= $available_slots { break }
@@ -1673,7 +1792,7 @@ def watch-command [args: list<string>] {
                         let slot_check = (watch-slot-acquire ($active_jobs | each {|j| $j.resource_key}) $resource_key $max_slots)
                         if $slot_check.ok {
                             let original_title = ($jobspec.title | str replace --regex '^\[M2C QUEUED\]\s*' '' | str trim)
-                            print $"Claiming job: ($original_title)"
+                            if not $tty_on { print $"Claiming job: ($original_title)" }
                             if (watch-claim-job $jobspec.repo $jobspec.issue_number $original_title) {
                                 let job_id = (worker-job-id)
                                 let runtime_jobspec = ($jobspec | insert job_id $job_id | upsert title $original_title)
@@ -1698,12 +1817,14 @@ def watch-command [args: list<string>] {
                                 }
                                 flight-write-manifest $job_id $manifest
                                 flight-append-event $job_id {event: "claimed", repo: $jobspec.repo, issue: $jobspec.issue_number}
-                                print $"Job dir: ($job_dir)"
-                                print $"Base: ($jobspec.base_sha)"
-                                print $"Branch: ($jobspec.branch)"
-                                print $"Worker: ($jobspec.worker)"
-                                print $"Profile: ($jobspec.profile)"
-                                print $"Budget: ($jobspec.budget_minutes)m"
+                                if not $tty_on {
+                                    print $"Job dir: ($job_dir)"
+                                    print $"Base: ($jobspec.base_sha)"
+                                    print $"Branch: ($jobspec.branch)"
+                                    print $"Worker: ($jobspec.worker)"
+                                    print $"Profile: ($jobspec.profile)"
+                                    print $"Budget: ($jobspec.budget_minutes)m"
+                                }
                                 flight-append-event $job_id {event: "runner_start"}
                                 let child_tag = (worker-mailbox-tag)
                                 let packet = $admission.packet
@@ -1748,7 +1869,7 @@ def watch-command [args: list<string>] {
                                     }
                                     {done: true} | job send 0 --tag $child_tag
                                 })
-                                print $"Child runner started: ($child_job)"
+                                if not $tty_on { print $"Child runner started: ($child_job)" }
                                 let runner_record = {
                                     job_id: $job_id
                                     job_dir: $job_dir
@@ -1766,13 +1887,13 @@ def watch-command [args: list<string>] {
                                 $active_jobs = ($active_jobs | append $runner_record)
                                 $admitted = $admitted + 1
                             } else {
-                                print "Failed to claim job."
+                                if not $tty_on { print "Failed to claim job." }
                             }
                         } else {
-                            print $"Skipping ($jobspec.repo):($jobspec.branch) - ($slot_check.reason)"
+                            if not $tty_on { print $"Skipping ($jobspec.repo):($jobspec.branch) - ($slot_check.reason)" }
                         }
                     } else {
-                        print $"Job rejected: ($admission.reason)"
+                        if not $tty_on { print $"Job rejected: ($admission.reason)" }
                         let blocked_repo = (watch-issue-repo $job)
                         let original_title = ($job.title | str replace --regex '^\[M2C QUEUED\]\s*' '' | str trim)
                         watch-update-title $blocked_repo $job.number $"[M2C BLOCKED] ($original_title)"
@@ -1789,7 +1910,8 @@ def watch-command [args: list<string>] {
                 let result_exists = ($result_path | path exists)
                 let elapsed_ns = (((date now) - $job_record.started_at) | into int)
                 let child_msg = (try { job recv --tag $job_record.child_tag --timeout 0sec } catch { null })
-                if $result_exists and ($child_msg != null) {
+                let child_alive = (try { (job list | any {|child| $child.id == $job_record.child_job}) } catch { true })
+                if $result_exists {
                     let result_record = (flight-read-result $job_record.job_id)
                     if ($result_record != null) {
                         controller-finalize-job $job_record $result_record
@@ -1807,10 +1929,15 @@ def watch-command [args: list<string>] {
                             (if ($result_record.closeout_ran? | default false) { "closeout ran" } else { "" })
                             (if ($result_record.failure_signature? | default null | is-not-empty) and ($result_record.category? | default "") != "DONE" { $result_record.failure_signature } else { "" })
                         ] | where {|p| ($p | is-not-empty)}
-                        print ($receipt_parts | str join " · ")
+                        let receipt_line = ($receipt_parts | str join " · ")
+                        if $tty_on {
+                            $pending_receipts = ($pending_receipts | append $receipt_line)
+                        } else {
+                            print $receipt_line
+                        }
                         $completed_indices = ($completed_indices | append $idx)
                     }
-                } else if (not $result_exists) and ($child_msg != null) {
+                } else if (not $result_exists) and (($child_msg != null) or (not $child_alive)) {
                     let result_record = {
                         job_id: $job_record.job_id
                         repo: $job_record.jobspec.repo
@@ -1839,16 +1966,21 @@ def watch-command [args: list<string>] {
                         completed_at: (iso-now-utc)
                         closeout_ran: false
                     }
-                    flight-append-event $job_record.job_id {event: "runner_disappeared", reason: "child sent terminal message but no result.json"}
+                    flight-append-event $job_record.job_id {event: "runner_disappeared", reason: (if $child_msg != null { "child sent terminal message but no result.json" } else { "child job exited without terminal message or result.json" })}
                     flight-write-result $job_record.job_id $result_record
                     controller-finalize-job $job_record $result_record
-                    print $"INTERNAL_ERROR · ($job_record.original_title) · ($job_record.jobspec.repo) · runner_disappeared"
+                    let err_receipt = $"INTERNAL_ERROR · ($job_record.original_title) · ($job_record.jobspec.repo) · runner_disappeared"
+                    if $tty_on {
+                        $pending_receipts = ($pending_receipts | append $err_receipt)
+                    } else {
+                        print $err_receipt
+                    }
                     $completed_indices = ($completed_indices | append $idx)
                 } else if (not $job_record.closeout_started) and ($elapsed_ns >= $job_record.soft_deadline_ns) {
                     let remaining_ns = ($job_record.hard_deadline_ns - $elapsed_ns)
                     let remaining_minutes = (if $remaining_ns > 0 { (($remaining_ns / 1000000000) / 60) | math round | into int } else { 1 })
                     let closeout_budget = ([1 $remaining_minutes] | math max)
-                    print $"Soft deadline hit for ($job_record.original_title). Killing runner and starting closeout (budget: ($closeout_budget)m)."
+                    if not $tty_on { print $"Soft deadline hit for ($job_record.original_title). Killing runner and starting closeout (budget: ($closeout_budget)m)." }
                     flight-append-event $job_record.job_id {event: "soft_deadline_hit", closeout_budget_minutes: $closeout_budget}
                     try { job kill $job_record.child_job } catch { }
                     let clone_dir = ($job_record.job_dir | path join "repo")
@@ -1902,7 +2034,7 @@ def watch-command [args: list<string>] {
                         } else { $row.item }
                     })
                 } else if ($elapsed_ns >= $job_record.hard_deadline_ns) {
-                    print $"Hard deadline hit for ($job_record.original_title). Forcing completion."
+                    if not $tty_on { print $"Hard deadline hit for ($job_record.original_title). Forcing completion." }
                     flight-append-event $job_record.job_id {event: "hard_deadline_hit"}
                     try { job kill $job_record.child_job } catch { }
                     if (not (flight-job-dir $job_record.job_id | path join "result.json" | path exists)) {
@@ -1944,6 +2076,25 @@ def watch-command [args: list<string>] {
             if ($completed_indices | length) > 0 {
                 $active_jobs = ($active_jobs | enumerate | where {|row| not ($row.index in $completed_indices)} | get item)
             }
+            let render_now = (date now)
+            let render_elapsed = (((($render_now - $last_panel_render_at) | into int) / 1000000000) | math round | into int)
+            if $tty_on and ($render_elapsed >= 6 or $panel_lines == 0) {
+                if ($pending_receipts | is-not-empty) {
+                    if $panel_lines > 0 {
+                        let esc = (char --integer 27)
+                        print --stderr $"($esc)[($panel_lines)A"
+                        for _ in 0..<$panel_lines { print --stderr $"($esc)[2K" }
+                        print --stderr $"($esc)[($panel_lines)A"
+                        $panel_lines = 0
+                    }
+                    for receipt in $pending_receipts { print --stderr $receipt }
+                    $pending_receipts = []
+                }
+                let state = (live-panel-state $active_jobs $max_slots $queued_count)
+                let frame = (live-panel-frame $state)
+                $panel_lines = (live-render-panel $frame $panel_lines)
+                $last_panel_render_at = $render_now
+            }
             if ($once or $check) and ($active_jobs | is-empty) { break }
             if (not $stay) and ($active_jobs | is-empty) { break }
             if ($active_jobs | is-empty) {
@@ -1955,13 +2106,16 @@ def watch-command [args: list<string>] {
     } catch {|err|
         let err_msg = ($err.msg? | default "watch error")
         let err_detail = (try { $err | to json -r } catch { "" })
+        let esc = (char --integer 27)
+        print --stderr $"($esc)[?25h"
         controller-release-lock
         print --stderr $"Watch error: ($err_msg)"
         if ($err_detail | is-not-empty) {
             print --stderr $"Error context: ($err_detail)"
         }
-        error make {msg: $err_msg, label: {text: "watch controller error", span: ($err.span? | default null)}}
+        controller-raise-watch-error $err
     }
+    if $tty_on { live-clear-panel $panel_lines }
     controller-release-lock
     print "Watch stopped."
 }
