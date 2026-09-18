@@ -3930,15 +3930,15 @@ let results = [
         assert-equal ($deps | length) 1 "one dep"
         assert-equal ($deps | get 0) 41 "dep value"
     })
-    (test "parse-depends-on rejects negative numbers" {
-        let deps = (parse-depends-on "[-1, 42]")
-        assert-equal ($deps | length) 1 "only valid dep"
-        assert-equal ($deps | get 0) 42 "valid dep preserved"
+    (test "parse-depends-on-result rejects negative numbers" {
+        let result = (parse-depends-on-result "[-1, 42]")
+        assert (not $result.ok) "negative dependency fails closed"
+        assert ($result.reason | str contains "invalid") "reason is useful"
     })
-    (test "parse-depends-on handles mixed valid and invalid" {
-        let deps = (parse-depends-on "[abc, 42, !@#]")
-        assert-equal ($deps | length) 1 "only valid dep"
-        assert-equal ($deps | get 0) 42 "valid dep preserved"
+    (test "parse-depends-on-result rejects mixed valid and invalid" {
+        let result = (parse-depends-on-result "[abc, 42, !@#]")
+        assert (not $result.ok) "malformed dependency fails closed"
+        assert ($result.reason | str contains "invalid") "reason is useful"
     })
     (test "parse-depends-on handles empty string" {
         let deps = (parse-depends-on "")
@@ -4051,6 +4051,12 @@ let results = [
         assert $result.ok "valid job accepted"
         assert-equal ($result.depends_on | length) 0 "no deps"
     })
+    (test "watch validate rejects malformed depends_on" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard", depends_on: "[41, nope]"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "malformed dependency rejected"
+        assert ($result.reason | str contains "invalid") "reason explains malformed dependency"
+    })
     # --- normalize-jobspec with depends_on ---
     (test "normalize-jobspec includes depends_on" {
         let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard", depends_on: "[41, 42]"}
@@ -4123,6 +4129,17 @@ let results = [
         let read_back = (flight-read-manifest $job_id)
         assert-equal ($read_back.depends_on | length) 0 "empty deps preserved"
     })
+    (test "flight manifest stores frozen deferred base evidence" {
+        let job_id = "deferred-base-001"
+        let manifest = {job_id: $job_id, repo: "test/repo", base_ref: "main", base_sha: "abcdef0123456789abcdef0123456789abcdef02", depends_on: [41]}
+        flight-write-manifest $job_id $manifest
+        flight-append-event $job_id {event: "base_frozen", base_ref: "main", base_sha: $manifest.base_sha}
+        let read_back = (flight-read-manifest $job_id)
+        let events = (flight-read-events $job_id)
+        assert-equal $read_back.base_ref "main" "base ref preserved"
+        assert-equal $read_back.base_sha $manifest.base_sha "exact frozen base preserved"
+        assert (($events | any {|event| ($event.event? | default "") == "base_frozen" and ($event.base_sha? | default "") == $manifest.base_sha}) ) "freeze event records exact SHA"
+    })
     # --- admission with dependencies ---
     (test "admission with no deps returns ok without waiting" {
         let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard"}
@@ -4156,6 +4173,24 @@ let results = [
         let result = (validate-depends-on [1 50 3] 50 "repo")
         assert (not $result.ok) "self-dep in middle rejected"
         assert ($result.reason | str contains "50") "reason mentions the self issue"
+    })
+    # --- dependency terminal-state semantics ---
+    (test "DONE dependency is eligible" {
+        assert (watch-dependency-terminal-success "CLOSED" "[M2C DONE] finished") "closed DONE is satisfied"
+    })
+    (test "open dependency is not eligible" {
+        assert (not (watch-dependency-terminal-success "OPEN" "[M2C DONE] not closed")) "open DONE is not satisfied"
+    })
+    (test "PARTIAL dependency is not eligible" {
+        assert (not (watch-dependency-terminal-success "CLOSED" "[M2C PARTIAL] delivered")) "PARTIAL is not satisfied"
+    })
+    (test "failed dependency is not eligible" {
+        assert (not (watch-dependency-terminal-success "CLOSED" "[M2C FAILED] failed")) "FAILED is not satisfied"
+    })
+    (test "missing dependency result is fail closed" {
+        let missing = {satisfied: false, exists: false, reason: "could not fetch issue #999999"}
+        assert (not $missing.satisfied) "missing dependency cannot satisfy"
+        assert (not $missing.exists) "missing dependency is distinguished"
     })
     # --- version bump ---
     (test "version is 0.2.5" {

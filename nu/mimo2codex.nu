@@ -1313,33 +1313,42 @@ def watch-gh-parse-front-matter [body: string] {
     }
 }
 
-def parse-depends-on [value: any] {
-    if ($value == null) or (($value | describe) == "nothing") { [] } else if (($value | describe) | str starts-with "list") {
-        $value | each {|item|
-            let str_val = ($item | into string | str trim | str trim --char '"')
-            if ($str_val | is-empty) { null } else if ($str_val | str starts-with "-") { null } else {
-                let cleaned = ($str_val | str replace --all --regex '[^0-9]' '')
-                if ($cleaned | is-empty) { null } else { ($cleaned | into int) }
-            }
-        } | where {|x| $x != null}
+def parse-dependency-token [value: any] {
+    let token = ($value | into string | str trim | str trim --char '"')
+    let match = ($token | parse --regex '^(?<number>[1-9][0-9]*)$')
+    if (($match | length) == 1) { {ok: true, value: ($match.0.number | into int)} } else { {ok: false, reason: $"invalid dependency issue number: ($token)"} }
+}
+
+def parse-depends-on-result [value: any] {
+    if ($value == null) or (($value | describe) == "nothing") { return {ok: true, deps: []} }
+    mut raw_items = []
+    if (($value | describe) | str starts-with "list") {
+        $raw_items = $value
     } else {
-        let str_val = ($value | into string | str trim | str trim --char '"')
-        if ($str_val | is-empty) { [] } else if ($str_val | str starts-with "[") {
-            let inner = ($str_val | str substring 1..-2 | str trim)
-            if ($inner | is-empty) { [] } else {
-                $inner | split row "," | each {|item|
-                    let trimmed = ($item | str trim)
-                    if ($trimmed | is-empty) { null } else if ($trimmed | str starts-with "-") { null } else {
-                        let num_str = ($trimmed | str replace --all --regex '[^0-9]' '')
-                        if ($num_str | is-empty) { null } else { ($num_str | into int) }
-                    }
-                } | where {|x| $x != null}
-            }
-        } else if ($str_val | str starts-with "-") { [] } else {
-            let cleaned = ($str_val | str replace --all --regex '[^0-9]' '')
-            if ($cleaned | is-empty) { [] } else { [($cleaned | into int)] }
+        let text = ($value | into string | str trim | str trim --char '"')
+        if ($text | is-empty) { return {ok: true, deps: []} }
+        if ($text | str starts-with "[") {
+            if not ($text | str ends-with "]") { return {ok: false, reason: "depends_on list is missing closing bracket"} }
+            let inner = ($text | str substring 1..-2 | str trim)
+            if ($inner | is-empty) { return {ok: true, deps: []} }
+            $raw_items = ($inner | split row ",")
+        } else {
+            if ($text | str contains "[") or ($text | str contains "]") { return {ok: false, reason: "malformed depends_on value"} }
+            $raw_items = [$text]
         }
     }
+    mut deps = []
+    for item in $raw_items {
+        let parsed = (parse-dependency-token $item)
+        if not $parsed.ok { return {ok: false, reason: $parsed.reason} }
+        $deps = ($deps | append $parsed.value)
+    }
+    {ok: true, deps: $deps}
+}
+
+def parse-depends-on [value: any] {
+    let result = (parse-depends-on-result $value)
+    if $result.ok { $result.deps } else { [] }
 }
 
 def validate-depends-on [deps: list<int> issue_number: int repo: string] {
@@ -1358,6 +1367,10 @@ def validate-depends-on [deps: list<int> issue_number: int repo: string] {
     }
 }
 
+def watch-dependency-terminal-success [state: string title: string] {
+    (($state | str lowercase) == "closed") and ($title | str starts-with "[M2C DONE]")
+}
+
 def watch-check-dep-issue [repo: string dep_number: int] {
     let dep_str = ($dep_number | into string)
     let result = (do { run-external "gh" "issue" "view" $dep_str "--repo" $repo "--json" "state,title" } | complete)
@@ -1366,7 +1379,7 @@ def watch-check-dep-issue [repo: string dep_number: int] {
         if ($detail == null) { {satisfied: false, reason: $"failed to parse issue #($dep_str)", exists: false} } else {
             let state = ($detail.state? | default "" | str lowercase)
             let title = ($detail.title? | default "")
-            if ($state == "closed") and ($title | str starts-with "[M2C DONE]") {
+            if (watch-dependency-terminal-success $state $title) {
                 {satisfied: true, reason: "", exists: true}
             } else if ($state == "open") {
                 {satisfied: false, reason: $"issue #($dep_str) is open (title: ($title))", exists: true}
@@ -1383,7 +1396,7 @@ def watch-deps-satisfied [repo: string deps: list<int>] {
     if ($deps | is-empty) { {ok: true, reason: ""} } else {
         for dep in $deps {
             let check = (watch-check-dep-issue $repo $dep)
-            if not $check.satisfied { return {ok: false, reason: $check.reason} }
+            if not $check.satisfied { return {ok: false, reason: $check.reason, waiting: ($check.exists? | default true)} }
         }
         {ok: true, reason: ""}
     }
@@ -1437,10 +1450,12 @@ def watch-validate-packet [fm: record] {
                             let budget_result = (watch-parse-budget ($fm | get -o "budget_minutes" | default null))
                             if (not $budget_result.ok) { $budget_result } else {
                                 let depends_on_raw = ($fm | get -o "depends_on" | default null)
-                                let depends_on = (parse-depends-on $depends_on_raw)
-                                let effective_base = (if $has_base { $base } else { "" })
-                                let needs_deferred_base = $has_base_ref
-                                {ok: true, base: $effective_base, branch: $branch, worker: $worker_str, profile: $profile, mode: $mode, budget_minutes: $budget_result.budget, depends_on: $depends_on, base_ref: $base_ref, needs_deferred_base: $needs_deferred_base}
+                                let depends_result = (parse-depends-on-result $depends_on_raw)
+                                if not $depends_result.ok { {ok: false, reason: $depends_result.reason} } else {
+                                    let effective_base = (if $has_base { $base } else { "" })
+                                    let needs_deferred_base = $has_base_ref
+                                    {ok: true, base: $effective_base, branch: $branch, worker: $worker_str, profile: $profile, mode: $mode, budget_minutes: $budget_result.budget, depends_on: $depends_result.deps, base_ref: $base_ref, needs_deferred_base: $needs_deferred_base}
+                                }
                             }
                         }
                     }
@@ -1540,7 +1555,7 @@ def watch-admit-job [issue: record login: string] {
                                     let dep_validation = (validate-depends-on $jobspec.depends_on $jobspec.issue_number $jobspec.repo)
                                     if (not $dep_validation.ok) { {ok: false, reason: $dep_validation.reason, waiting: false} } else {
                                         let deps_met = (watch-deps-satisfied $jobspec.repo $jobspec.depends_on)
-                                        if (not $deps_met.ok) { {ok: false, reason: $deps_met.reason, waiting: true} } else {
+                                        if (not $deps_met.ok) { {ok: false, reason: $deps_met.reason, waiting: ($deps_met.waiting | default true)} } else {
                                             if $jobspec.needs_deferred_base {
                                                 let resolved = (resolve-default-branch-sha $jobspec.repo)
                                                 if (not $resolved.ok) { {ok: false, reason: $resolved.reason, waiting: false} } else {
@@ -2065,12 +2080,16 @@ def watch-command [args: list<string>] {
                                     budget_minutes: $jobspec.budget_minutes
                                     description: $jobspec.description
                                     depends_on: ($jobspec.depends_on | default [])
+                                    base_ref: ($jobspec.base_ref | default "")
                                     resource_key: $resource_key
                                     claimed_at: (iso-now-utc)
                                     m2c_version: (version-value)
                                     m2c_source_hash: (source-hash-short)
                                 }
                                 flight-write-manifest $job_id $manifest
+                                if $jobspec.needs_deferred_base {
+                                    flight-append-event $job_id {event: "base_frozen", base_ref: $jobspec.base_ref, base_sha: $jobspec.base_sha}
+                                }
                                 flight-append-event $job_id {event: "claimed", repo: $jobspec.repo, issue: $jobspec.issue_number}
                                 if not $tty_on {
                                     print $"Job dir: ($job_dir)"
@@ -2437,6 +2456,7 @@ def inspect-command [args: list<string>] {
     print $"Title: ($manifest.title? | default "?")"
     print $"Worker: ($manifest.worker? | default "?") / ($manifest.profile? | default "?")"
     print $"Base: ($manifest.base_sha? | default "?")"
+    if (($manifest.base_ref? | default "") | is-not-empty) { print $"Base ref: ($manifest.base_ref) (frozen)" }
     print $"Branch: ($manifest.branch? | default "?")"
     print $"Budget: ($manifest.budget_minutes? | default 20)m"
     let deps = ($manifest.depends_on? | default [])
