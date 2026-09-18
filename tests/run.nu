@@ -3357,6 +3357,142 @@ let results = [
         assert-equal $prep.branch "mimo/shape" "branch value correct"
         assert-equal $prep.declared_base_sha $base_sha "declared_base_sha value correct"
     })
+    # --- Meta backend tests ---
+    (test "Meta provider data loads from config" {
+        let data = (meta-provider-data)
+        assert-equal $data.provider.id "meta" "provider id"
+        assert-equal $data.provider.endpoint "https://api.meta.ai/v1" "endpoint"
+        assert-equal $data.provider.env_key "MODEL_API_KEY" "env key"
+        assert-equal $data.provider.protocol "responses" "protocol"
+    })
+    (test "Meta contributor profile resolves deterministically" {
+        let resolved = (meta-resolve-profile "contributor")
+        assert $resolved.ok "contributor resolves"
+        assert-equal $resolved.model "muse-spark-1.3-contributor" "model"
+        assert-equal $resolved.reasoning_effort "high" "reasoning effort"
+    })
+    (test "Unknown Meta profile fails closed" {
+        let resolved = (meta-resolve-profile "nonexistent")
+        assert (not $resolved.ok) "unknown profile fails"
+        assert ($resolved.reason | str contains "unknown Meta profile") "reason mentions unknown"
+    })
+    (test "Meta model catalogue entry exists" {
+        let catalog = (catalogue-data).models
+        let meta_model = ($catalog | where slug == "muse-spark-1.3-contributor" | first)
+        assert ($meta_model != null) "meta model in catalogue"
+        assert-equal $meta_model.provider "meta" "provider field"
+        assert-equal $meta_model.profile "contributor" "profile field"
+        assert-equal $meta_model.default_reasoning_level "high" "reasoning level"
+    })
+    (test "Meta credential reads from environment" {
+        with-env {MODEL_API_KEY: "test-meta-key-12345"} {
+            let info = (meta-credential-info)
+            assert-equal $info.status "configured" "configured from env"
+            assert-equal $info.source "environment" "source is environment"
+            assert-equal $info.value "test-meta-key-12345" "value passed"
+        }
+    })
+    (test "Meta credential missing reports missing" {
+        with-env {MODEL_API_KEY: ""} {
+            let info = (meta-credential-info)
+            assert-equal $info.status "missing" "missing status"
+            assert-equal $info.source "none" "source is none"
+        }
+    })
+    (test "Meta credential stored value works" {
+        meta-write-credential "test-stored-meta-key"
+        let info = (meta-credential-info)
+        assert-equal $info.status "configured" "configured from stored"
+        assert-equal $info.source "stored" "source is stored"
+    })
+    (test "Meta credential never appears in doctor output" {
+        meta-write-credential "test-meta-SECRET-key-12345"
+        let doctor_output = (try { doctor [] | to json } catch { "" })
+        assert (not ($doctor_output | str contains "test-meta-SECRET")) "no secret in doctor"
+    })
+    (test "Meta worker config contains correct endpoint" {
+        let config = (meta-worker-config true)
+        let provider_config = ($config.provider | get "m2c-meta")
+        assert-equal $provider_config.options.baseURL "https://api.meta.ai/v1" "endpoint"
+        assert-equal $provider_config.options.apiKey "{env:MODEL_API_KEY}" "env reference"
+    })
+    (test "Meta worker config has model entry" {
+        let config = (meta-worker-config true)
+        let provider_config = ($config.provider | get "m2c-meta")
+        let model = ($provider_config.models | get "muse-spark-1.3-contributor")
+        assert ($model != null) "model exists"
+        assert-equal $model.limit.context 1048576 "context window"
+    })
+    (test "Meta worker config json has no secrets" {
+        let json = (meta-worker-config-json)
+        assert (not ($json | str contains "test-meta-SECRET")) "no secret in json"
+        assert ($json | str contains "MODEL_API_KEY") "env reference present"
+    })
+    (test "Meta provider id is m2c-meta" {
+        assert-equal (meta-worker-provider-id) "m2c-meta" "provider id"
+    })
+    (test "Meta model records list contributor" {
+        let records = (meta-model-records)
+        assert-equal ($records | length) 1 "one profile"
+        assert-equal ($records.0.profile) "contributor" "profile name"
+        assert-equal ($records.0.model) "muse-spark-1.3-contributor" "model id"
+    })
+    (test "Meta watch-validate accepts worker=meta" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", worker: "meta", model: "contributor"}
+        let result = (watch-validate-packet $fm)
+        assert $result.ok "meta worker accepted"
+        assert-equal $result.worker "meta" "worker field"
+        assert-equal $result.profile "contributor" "profile field"
+    })
+    (test "Meta watch-validate defaults profile to contributor" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", worker: "meta"}
+        let result = (watch-validate-packet $fm)
+        assert $result.ok "meta without model accepted"
+        assert-equal $result.profile "contributor" "defaults to contributor"
+    })
+    (test "Meta watch-validate rejects invalid profile" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", worker: "meta", model: "invalid"}
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "invalid meta profile rejected"
+        assert ($result.reason | str contains "contributor") "reason mentions contributor"
+    })
+    (test "Meta normalize-frontmatter extracts worker and profile" {
+        let fm = {worker: "meta", model: "contributor"}
+        let norm = (watch-normalize-frontmatter $fm)
+        assert-equal $norm.worker "meta" "worker"
+        assert-equal $norm.profile "contributor" "profile"
+    })
+    (test "Meta normalize-frontmatter defaults profile" {
+        let fm = {worker: "meta"}
+        let norm = (watch-normalize-frontmatter $fm)
+        assert-equal $norm.profile "contributor" "default profile"
+    })
+    (test "Meta worker dispatch accepts meta worker" {
+        let cred_path = (state-path "meta-credential")
+        if ($cred_path | path exists) { rm $cred_path }
+        with-env {MODEL_API_KEY: ""} {
+            let result = (try { worker-dispatch "meta" "contributor" "test" null null null true "build" false $project_root 20; "ok" } catch { |err| let msg = ($err.msg? | default "blocked"); if ($msg | str contains "Meta MODEL_API_KEY") { "credential_blocked" } else { $msg } })
+            assert ($result in ["ok", "credential_blocked"]) "meta worker accepted or blocked by credential"
+        }
+    })
+    (test "Meta worker dispatch rejects unknown worker" {
+        let result = (try { worker-dispatch "unknown-worker" "standard" "test" null null null true "build" false $project_root 20; "unexpected" } catch { "blocked" })
+        assert-equal $result "blocked" "unknown worker rejected"
+    })
+    (test "Meta live panel shows Meta Contributor profile" {
+        let now = (date now)
+        let job = {job_id: "j1", original_title: "Test", jobspec: {worker: "meta", profile: "contributor", title: "Test"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        assert-equal ($state.active.0.profile) "Meta Contributor" "meta profile display"
+    })
+    (test "Meta skill installs and removes" {
+        let path = (install-meta-skill)
+        assert ($path | path exists) "meta skill installed"
+        let content = (open --raw $path)
+        assert ($content | str contains "Meta Muse Spark") "skill mentions Meta"
+        remove-meta-skill
+        assert (not ($path | path exists)) "meta skill removed"
+    })
 ]
 
 print ($results | table)

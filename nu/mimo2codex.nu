@@ -215,11 +215,278 @@ def opencode-version [] {
 }
 
 def worker-provider-id [] { "m2c-mimo" }
+def meta-worker-provider-id [] { "m2c-meta" }
+
+def meta-provider-data [] { open (config-path "meta.json") }
+
+def meta-valid-key [value: string] {
+    let key = ($value | str trim)
+    ($key | is-not-empty) and (($key | str length) > 3)
+}
+
+def meta-key-file-value [] {
+    let credential_path = (state-path "meta-credential")
+    if ($credential_path | path exists) { try { open --raw $credential_path | str trim } catch { "" } } else { "" }
+}
+
+def meta-credential-info [] {
+    let env_key = ($env.MODEL_API_KEY? | default "" | str trim)
+    if ($env_key | is-not-empty) {
+        if (meta-valid-key $env_key) { {status: "configured", value: $env_key, source: "environment"} } else { {status: "invalid format", value: "", source: "environment"} }
+    } else {
+        let stored = (meta-key-file-value)
+        if ($stored | is-empty) { {status: "missing", value: "", source: "none"} } else if (meta-valid-key $stored) { {status: "configured", value: $stored, source: "stored"} } else { {status: "invalid format", value: "", source: "stored"} }
+    }
+}
+
+def meta-credential-status [] { meta-credential-info | get status }
+
+def meta-write-credential [value: string] {
+    mkdir (state-root)
+    $value | save --force (state-path "meta-credential")
+    protect-credential-file (state-path "meta-credential")
+}
+
+def meta-resolve-profile [profile: string] {
+    let data = (meta-provider-data)
+    let profiles = ($data.profiles | columns)
+    if ($profile in $profiles) {
+        let p = ($data.profiles | get $profile)
+        {ok: true, model: $p.model, reasoning_effort: $p.reasoning_effort, description: $p.description}
+    } else {
+        {ok: false, reason: $"unknown Meta profile: ($profile); valid profiles: ($profiles | str join ', ')"}
+    }
+}
+
+def meta-toml-config [model: string reasoning_effort: string] {
+    let provider = (meta-provider-data).provider
+    let catalogue = (catalogue-path | path expand)
+    {
+        model: $model
+        model_provider: (meta-worker-provider-id)
+        model_reasoning_effort: $reasoning_effort
+        model_supports_reasoning_summaries: true
+        model_reasoning_summary: "none"
+        model_context_window: $provider.context_window
+        web_search: $provider.web_search
+        model_catalog_json: $catalogue
+        model_providers: {
+            (meta-worker-provider-id): {
+                name: $provider.name
+                base_url: $provider.endpoint
+                env_key: $provider.env_key
+                wire_api: $provider.protocol
+                requires_openai_auth: $provider.requires_openai_auth
+            }
+        }
+    } | to toml
+}
+
+def meta-worker-config [machine: bool = true] {
+    let provider = (meta-provider-data).provider
+    let resolved = (meta-resolve-profile "contributor")
+    {
+        "$schema": "https://opencode.ai/config.json"
+        enabled_providers: [(meta-worker-provider-id)]
+        permission: {
+            "*": "allow"
+            question: (if $machine { "deny" } else { "ask" })
+            task: "deny"
+            doom_loop: "deny"
+            external_directory: "deny"
+            webfetch: "deny"
+            websearch: "deny"
+        }
+        provider: {
+            (meta-worker-provider-id): {
+                npm: "@ai-sdk/openai-compatible"
+                name: "Meta Muse Spark via m2c"
+                options: {
+                    baseURL: $provider.endpoint
+                    apiKey: "{env:MODEL_API_KEY}"
+                }
+                models: {
+                    ($resolved.model): {
+                        name: $resolved.model
+                        limit: {context: $provider.context_window, output: 131072}
+                        modalities: {input: [text], output: [text]}
+                    }
+                }
+            }
+        }
+    }
+}
+
+def meta-worker-config-json [] { meta-worker-config | to json -r }
+
+def meta-worker-skill [] {
+    [
+        "---"
+        "name: meta-worker"
+        "description: Delegate bounded development, analysis, review, testing, debugging or second-opinion work to Meta Muse Spark through m2c. Use when Matthew explicitly asks for Meta Muse Spark, or when a bounded subtask benefits from an independent Meta contributor-tier worker."
+        "---"
+        ""
+        "Meta Muse Spark is available through the local `m2c` command. Explicit Matthew requests always win."
+        ""
+        "Machine delegation:"
+        ""
+        "    m2c meta run --json \"<bounded task>\""
+        "    m2c meta contributor run --json \"<bounded task>\""
+        ""
+        "For related packets, use `--workstream <name> --packet <id>`. Aim for 10-15 minutes and never assign a deliberately oversized packet; split it first."
+        ""
+        "The contributor profile uses muse-spark-1.3-contributor with reasoning_effort=high. If Matthew names the model, obey him. State briefly when Meta is selected."
+        ""
+        "m2c is responsible for the bounded worker process, context rollover, and result envelope. The coordinating agent remains responsible for checking files, tests, evidence, and unresolved issues. Never silently trust a worker `done` message or silently fall back to another provider."
+        ""
+        "Do not delegate overlapping writes to the same working tree concurrently. Use separate worktrees or serialize packets. Textual pseudo-tool calls are never executable; only OpenCode structured tool events may perform work."
+        ""
+    ] | str join "\n"
+}
+
+def install-meta-skill [] {
+    let destination = (skill-root | path join "meta-worker" | path join "SKILL.md")
+    mkdir ($destination | path dirname)
+    meta-worker-skill | save --force $destination
+    $destination
+}
+
+def remove-meta-skill [] {
+    let directory = (skill-root | path join "meta-worker")
+    if ($directory | path exists) { rm --recursive $directory }
+}
+
+def meta-model-records [] {
+    let data = (meta-provider-data)
+    let catalogue = (catalogue-data).models
+    $data.profiles | transpose profile detail | each {|row|
+        let detail = ($catalogue | where slug == $row.detail.model | first)
+        {profile: $row.profile, model: $row.detail.model, reasoning: $row.detail.reasoning_effort, description: $row.detail.description}
+    }
+}
+
+def meta-worker-command [model: string prompt: string session_id: any cwd: path agent: string = "build" fork: bool = false] {
+    let base = ["run" "--pure" "--model" (worker-model $model) "--agent" $agent "--format" "json" "--dir" ($cwd | path expand)]
+    let continued = (if ($session_id == null) { $base } else if $fork { $base | append ["--session" $session_id "--fork"] } else { $base | append ["--session" $session_id] })
+    $continued | append $prompt
+}
+
+def meta-worker-run [model: string prompt: string workstream: any packet: any session_id: any quiet: bool = false agent: string = "build" fork: bool = false cwd: any = null budget_minutes: int = 20] {
+    let opencode = (opencode-path)
+    if ($opencode | is-empty) { error make {msg: "OpenCode is not installed. Run: npm install -g opencode-ai"} }
+    let credential = (meta-credential-info)
+    if $credential.status != "configured" { error make {msg: "Meta MODEL_API_KEY credential is not configured. Run: m2c meta setup"} }
+    let cwd = (if ($cwd != null) { $cwd | path expand } else { pwd | path expand })
+    let job_id = (worker-job-id)
+    let raw_path = (job-root | path join $"($job_id).jsonl")
+    let stderr_path = (job-root | path join $"($job_id).stderr")
+    mkdir (job-root)
+    let command = (meta-worker-command $model $prompt $session_id $cwd $agent $fork)
+    let environment = {OPENCODE_CONFIG_CONTENT: (meta-worker-config true | to json -r), MODEL_API_KEY: $credential.value}
+    let started = (date now)
+    let watchdog_ns = (watchdog-limit-from-budget $budget_minutes)
+    let watchdog_seconds = (($watchdog_ns / 1000000000) | math round | into int)
+    let soft_ns = (soft-deadline-ns $budget_minutes)
+    let closeout_ns = (closeout-reserve-ns $budget_minutes)
+    let mailbox_tag = (worker-mailbox-tag)
+    let job = (job spawn --description $"m2c OpenCode worker ($model)" {
+        with-env $environment {
+            try {
+                let result = (run-external $opencode ...$command | complete)
+                $result.stdout | save --force $raw_path
+                if ($result.stderr? | default "" | is-not-empty) {
+                    $result.stderr | save --force $stderr_path
+                }
+                {exit_code: ($result.exit_code? | default 0)} | job send 0 --tag $mailbox_tag
+            } catch {
+                {exit_code: ($env.LAST_EXIT_CODE? | default 1)} | job send 0 --tag $mailbox_tag
+            }
+        }
+    })
+    let console_on = (console-enabled $quiet)
+    mut previous_lines = 0
+    mut last_event_at = $started
+    mut last_size = -1
+    mut finished: any = null
+    mut done = false
+    mut last_render_at = $started
+    mut rendered_event_count = 0
+    mut soft_deadline_hit = false
+    while not $done {
+        let raw = (if ($raw_path | path exists) { open --raw $raw_path } else { "" })
+        let size = ($raw | str length)
+        if $size != $last_size { $last_event_at = (date now); $last_size = $size }
+        let events = (parse-worker-events $raw)
+        let state = (worker-console-state $events $model $started $watchdog_seconds $last_event_at true)
+        let new_events = ($events | skip $rendered_event_count)
+        let elapsed_since_render = (((((date now) - $last_render_at) | into int) / 1000000000) | math round)
+        let meaningful_event = ($new_events | any {|event| console-meaningful-event $event})
+        let refresh = ($previous_lines == 0) or $meaningful_event or ($elapsed_since_render >= 10)
+        if $console_on and $refresh {
+            let frame = (console-frame $state (try { (term size).columns } catch { 80 }))
+            let esc = (char --integer 27)
+            if $previous_lines == 0 { print -n --stderr $"($esc)[?25l" }
+            $previous_lines = (render-console $frame $previous_lines)
+            $last_render_at = (date now)
+            $rendered_event_count = ($events | length)
+        }
+        let elapsed_ns = (((date now) - $started) | into int)
+        if (not $soft_deadline_hit) and ($elapsed_ns >= $soft_ns) {
+            $soft_deadline_hit = true
+        }
+        let message = (try { job recv --tag $mailbox_tag --timeout 0sec } catch { null })
+        if $message != null {
+            $finished = {exit_code: ($message.exit_code? | default 1), timed_out: false, cancelled: false, soft_deadline_hit: $soft_deadline_hit}
+            $done = true
+        } else {
+            if $elapsed_ns >= $watchdog_ns {
+                try { job kill $job } catch { }
+                $finished = {exit_code: 124, timed_out: true, cancelled: false, soft_deadline_hit: $soft_deadline_hit}
+                $done = true
+            } else {
+                let interrupted = (try { sleep 3sec; false } catch { true })
+                if $interrupted {
+                    try { job kill $job } catch { }
+                    $finished = {exit_code: 130, timed_out: false, cancelled: true, soft_deadline_hit: $soft_deadline_hit}
+                    $done = true
+                }
+            }
+        }
+    }
+    let ended = (date now)
+    let duration = (((($ended - $started) | into int) / 1000000000) | math round)
+    let raw = (if ($raw_path | path exists) { open --raw $raw_path } else { "" })
+    let events = (parse-worker-events $raw)
+    let telemetry = (telemetry-derived $events $started $ended)
+    let telemetry_dir = (state-path "runs" | path join $job_id)
+    let telemetry_path = ($telemetry_dir | path join "events.jsonl")
+    mkdir $telemetry_dir
+    ($telemetry.records | each {|record| $record | to json -r} | str join "\n" | save --force $telemetry_path)
+    let telemetry_summary = ($telemetry | reject records | insert telemetry_path $telemetry_path)
+    let final_status = (if ($finished.cancelled? | default false) { "cancelled" } else if $finished.timed_out { "timed_out" } else if $finished.exit_code == 0 { "complete" } else { "failed" })
+    if $console_on {
+        let final_state = (worker-console-state $events $model $started $watchdog_seconds $last_event_at false $final_status)
+        let frame = (console-frame $final_state (try { (term size).columns } catch { 80 }))
+        $previous_lines = (render-console $frame $previous_lines)
+        finish-console true $previous_lines
+    }
+    let result = (result-envelope (worker-summary $events $model $workstream $packet $duration $finished.exit_code $finished.timed_out ($finished.cancelled? | default false) $telemetry_summary $budget_minutes) $agent)
+    let stderr_exists = ($stderr_path | path exists)
+    let stderr_size = (if $stderr_exists { try { open --raw $stderr_path | str length } catch { 0 } } else { 0 })
+    {summary: ($result | insert soft_deadline_hit ($finished.soft_deadline_hit? | default false) | insert stderr_exists $stderr_exists | insert stderr_bytes $stderr_size), raw_path: $raw_path, stderr_path: $stderr_path}
+}
 
 def worker-dispatch [worker: string profile: string prompt: string workstream: any packet: any session_id: any quiet: bool agent: string fork: bool cwd: path budget_minutes: int] {
-    if $worker != "mimo" { error make {msg: $"unknown worker: ($worker); only mimo is supported"} }
-    let model_id = (if $profile == "pro" { (provider-data).models.pro } else { (provider-data).models.standard })
-    worker-run $model_id $prompt $workstream $packet $session_id $quiet $agent $fork $cwd $budget_minutes
+    if $worker == "mimo" {
+        let model_id = (if $profile == "pro" { (provider-data).models.pro } else { (provider-data).models.standard })
+        worker-run $model_id $prompt $workstream $packet $session_id $quiet $agent $fork $cwd $budget_minutes
+    } else if $worker == "meta" {
+        let resolved = (meta-resolve-profile $profile)
+        if (not $resolved.ok) { error make {msg: $resolved.reason} }
+        meta-worker-run $resolved.model $prompt $workstream $packet $session_id $quiet $agent $fork $cwd $budget_minutes
+    } else {
+        error make {msg: $"unknown worker: ($worker); supported workers: mimo, meta"}
+    }
 }
 def worker-model [model: string] { $"(worker-provider-id)/($model)" }
 def worker-agent [task: string] {
@@ -605,7 +872,7 @@ def live-panel-state [active_jobs: list max_slots: int queued_count: int] {
         let deadline_wall = ($job.started_at + ($hard_s | into duration --unit sec))
         {
             title: (resolve-description $job.jobspec)
-            profile: (if $job.jobspec.profile == "pro" { "MiMo Pro" } else { "MiMo Standard" })
+            profile: (if ($job.jobspec | get -o "worker" | default "mimo") == "meta" { "Meta Contributor" } else if $job.jobspec.profile == "pro" { "MiMo Pro" } else { "MiMo Standard" })
             phase: (if $job.closeout_started { "CLOSEOUT" } else { "WORKING" })
             elapsed_seconds: $elapsed_s
             closeout_at: $closeout_wall
@@ -1016,7 +1283,7 @@ def checkpoint-command [args: list<string>] {
 }
 
 def print-help [] {
-    print "mimo2codex - bounded Xiaomi MiMo workers for Codex and local development"
+    print "mimo2codex - bounded workers for Codex and local development (MiMo + Meta)"
     print ""
     print "Usage: m2c [command] [arguments...]"
     print ""
@@ -1031,6 +1298,13 @@ def print-help [] {
     print "  m2c packet FILE             run a Standard packet file"
     print "  m2c standard packet FILE    run a Standard packet file"
     print "  m2c pro packet FILE         run a Pro packet file"
+    print "  m2c meta run \"task\"        run with Meta Muse Spark contributor"
+    print "  m2c meta contributor run \"task\"  explicit Meta contributor profile"
+    print "  m2c meta setup              configure Meta backend"
+    print "  m2c meta doctor [--live]    diagnose Meta configuration"
+    print "  m2c meta key status         show Meta credential status"
+    print "  m2c meta key replace        replace Meta credential"
+    print "  m2c meta key remove         remove Meta credential"
     print "  m2c models                  list supported models"
     print "  m2c setup                   install/repair isolated MiMo configuration"
     print "  m2c doctor [--live]         diagnose configuration; --live checks the worker"
@@ -1085,6 +1359,7 @@ def doctor [args: list<string> = []] {
     let provider = (provider-data).provider
     let catalog_ok = (try { check-catalogue } catch { false })
     let credential = (credential-info)
+    let meta_credential = (meta-credential-info)
     let codex_path = (which codex | get path? | first | default "")
     let codex_version = (read-codex-version)
     let codex_ok = (($codex_path | is-not-empty) and ($codex_version not-in ["missing", "unavailable"]))
@@ -1095,8 +1370,10 @@ def doctor [args: list<string> = []] {
     let opencode_path = (opencode-path)
     let opencode_platform = (opencode-platform-status $opencode_path)
     let skill = (skill-path)
+    let meta_skill = (skill-root | path join "meta-worker" | path join "SKILL.md")
     let direct_live = (if $live { live-check $credential } else { "SKIP" })
     let worker_live = (if ($live and ($opencode != "missing")) { worker-live-check (provider-data).models.standard } else { "SKIP" })
+    let meta_catalog_ok = (try { (catalogue-data).models | any {|m| $m.slug == "muse-spark-1.3-contributor"} } catch { false })
     let rows = [
         (check-row "Platform" (if (["windows", "unix"] | any {|x| $x == $nu.os-info.family}) { "PASS" } else { "FAIL" }) $nu.os-info.name)
         (check-row "Nushell" "PASS" (nu-version))
@@ -1110,19 +1387,23 @@ def doctor [args: list<string> = []] {
         (check-row "Model catalogue" (if (($catalogue_path | path exists) and $catalog_ok) { "PASS" } else { "FAIL" }) $catalogue_path)
         (check-row "mimo-v2.5" (if ($catalog_ok and ((required-models).0 in ((catalogue-data).models | get slug))) { "PASS" } else { "FAIL" }) "required model")
         (check-row "mimo-v2.5-pro" (if ($catalog_ok and ((required-models).1 in ((catalogue-data).models | get slug))) { "PASS" } else { "FAIL" }) "required model")
-        (check-row "Credential" $credential.status $credential.source)
-        (check-row "Credential format" (if $credential.status == "configured" { "PASS" } else { "FAIL" }) "Token Plan prefix tp-")
-        (check-row "Endpoint" (if $provider.endpoint == "https://token-plan-ams.xiaomimimo.com/v1" { "PASS" } else { "FAIL" }) $provider.endpoint)
+        (check-row "MiMo Credential" $credential.status $credential.source)
+        (check-row "MiMo Credential format" (if $credential.status == "configured" { "PASS" } else { "FAIL" }) "Token Plan prefix tp-")
+        (check-row "MiMo Endpoint" (if $provider.endpoint == "https://token-plan-ams.xiaomimimo.com/v1" { "PASS" } else { "FAIL" }) $provider.endpoint)
         (check-row "Child environment injection" (child-injection-status $credential) "scoped to Codex child")
-        (check-row "Codex skill" (if ($skill | path exists) { "PASS" } else { "FAIL" }) $skill)
+        (check-row "MiMo Codex skill" (if ($skill | path exists) { "PASS" } else { "FAIL" }) $skill)
         (check-row "Direct Codex inference" $direct_live (if $live { "explicit check" } else { "use --live" }))
         (check-row "Direct Codex tools" "KNOWN FAIL" "MiMo Responses compatibility issue")
         (check-row "OpenCode worker" $worker_live (if $live { "standard live check" } else { "use --live" }))
         (check-row "Recommended backend" "PASS" "OpenCode")
         (check-row "GitHub CLI (gh)" (if (watch-gh-available) { "PASS" } else { "MISSING" }) (if (watch-gh-available) { "authenticated for m2c watch" } else { "not found or not authed" }))
+        (check-row "Meta Backend" "OPTIONAL" "Meta Muse Spark 1.3 Contributor")
+        (check-row "Meta Credential" $meta_credential.status $meta_credential.source)
+        (check-row "Meta catalogue" (if $meta_catalog_ok { "PASS" } else { "FAIL" }) "muse-spark-1.3-contributor")
+        (check-row "Meta Codex skill" (if ($meta_skill | path exists) { "PASS" } else { "FAIL" }) $meta_skill)
     ]
     print ($rows | table)
-    let required = ($rows | where {|row| not ($row.check in ["Codex", "Direct Codex tools", "Direct Codex inference", "OpenCode worker"])} | all {|row| ($row.status == "PASS") or (($row.check == "Credential") and ($row.status == "configured"))})
+    let required = ($rows | where {|row| not ($row.check in ["Codex", "Direct Codex tools", "Direct Codex inference", "OpenCode worker", "Meta Backend", "Meta Credential", "Meta catalogue", "Meta Codex skill"])} | all {|row| ($row.status == "PASS") or (($row.check == "MiMo Credential") and ($row.status == "configured"))})
     if $live and (($rows | where check in ["Direct Codex inference", "OpenCode worker"] | where status != "PASS" | length) > 0) { error make {msg: "Live provider check failed."} }
     if (not $required) { error make {msg: "Configuration is not ready. Run m2c setup."} }
 }
@@ -1264,13 +1545,20 @@ def watch-validate-packet [fm: record] {
         if ($base | str length) != 40 { {ok: false, reason: $"base must be a 40-char SHA, got ($base | str length) chars"} } else if not (watch-hex-sha $base) { {ok: false, reason: $"base must be exactly 40 hexadecimal characters, contains non-hex: ($base)"} } else {
             let branch = ($fm | get -o "branch" | default "")
             if ($branch == "main") or ($branch == "master") { {ok: false, reason: $"target branch cannot be main or master, got ($branch)"} } else if ($branch | is-empty) { {ok: false, reason: "branch field is required"} } else {
-                let model_str = ($fm | get -o "model" | default "")
-                let parsed_model = (if ($model_str | is-not-empty) { watch-parse-model $model_str } else { null })
-                let has_explicit_model = ($model_str | is-not-empty)
-                if $has_explicit_model and ($parsed_model == null) { {ok: false, reason: $"invalid model ($model_str); must be standard or pro"} } else {
-                    let worker_str = ($fm | get -o "worker" | default "mimo" | str trim)
-                    if ($worker_str != "mimo") { {ok: false, reason: $"unknown worker: ($worker_str); only mimo is supported"} } else {
-                        let profile = ($parsed_model | default "standard")
+                let worker_str = ($fm | get -o "worker" | default "mimo" | str trim)
+                if ($worker_str not-in ["mimo", "meta"]) { {ok: false, reason: $"unknown worker: ($worker_str); supported workers: mimo, meta"} } else {
+                    let model_str = ($fm | get -o "model" | default "")
+                    let profile = (if $worker_str == "meta" {
+                        let meta_profile = ($model_str | str trim | str trim --char '"')
+                        if ($meta_profile | is-empty) { "contributor" } else if ($meta_profile == "contributor") { "contributor" } else { null }
+                    } else {
+                        let parsed_model = (if ($model_str | is-not-empty) { watch-parse-model $model_str } else { null })
+                        let has_explicit_model = ($model_str | is-not-empty)
+                        if $has_explicit_model and ($parsed_model == null) { null } else { ($parsed_model | default "standard") }
+                    })
+                    if ($profile == null) {
+                        if ($worker_str == "meta") { {ok: false, reason: $"invalid Meta profile ($model_str); must be contributor"} } else { {ok: false, reason: $"invalid model ($model_str); must be standard or pro"} }
+                    } else {
                         let mode = ($fm | get -o "mode" | default "build" | str trim)
                         if ($mode not-in ["build", "plan"]) { {ok: false, reason: $"invalid mode: ($mode); must be build or plan"} } else {
                             let budget_result = (watch-parse-budget ($fm | get -o "budget_minutes" | default null))
@@ -1301,10 +1589,15 @@ def watch-parse-model [value: string] {
 def watch-normalize-frontmatter [fm: record] {
     let worker = ($fm | get -o "worker" | default "mimo" | str trim)
     let model_str = ($fm | get -o "model" | default "")
-    let profile = (if ($model_str | is-not-empty) { watch-parse-model $model_str } else { null })
-    let profile_val = ($profile | default "standard")
+    let profile = (if $worker == "meta" {
+        let meta_profile = ($model_str | str trim | str trim --char '"')
+        if ($meta_profile | is-empty) { "contributor" } else if ($meta_profile == "contributor") { "contributor" } else { "contributor" }
+    } else {
+        let parsed = (if ($model_str | is-not-empty) { watch-parse-model $model_str } else { null })
+        ($parsed | default "standard")
+    })
     let mode = ($fm | get -o "mode" | default "build" | str trim)
-    {worker: $worker, profile: $profile_val, mode: $mode}
+    {worker: $worker, profile: $profile, mode: $mode}
 }
 
 def watch-parse-budget [value: any] {
@@ -2413,6 +2706,7 @@ def uninstall [] {
     let root = (state-root)
     if ($root | path exists) { rm --recursive $root }
     remove-mimo-skill
+    remove-meta-skill
     print "mimo2codex removed. Normal Codex configuration, OpenCode configuration and repositories were not touched."
 }
 
@@ -2420,13 +2714,147 @@ export def version [] { print (version-value) }
 
 export def invoke [...args: string] {
     let command = ($args | first | default "")
-    if $command in ["help", "--help", "-h"] { print-help } else if $command == "version" { version } else if $command == "models" { model-records | table } else if $command == "setup" { setup } else if $command == "doctor" { doctor ($args | skip 1) } else if $command == "key" { key-command ($args | skip 1) } else if $command == "checkpoint" { checkpoint-command ($args | skip 1) } else if $command == "watch" { watch-command ($args | skip 1) } else if $command == "status" { status-command } else if $command == "queue" { queue-command } else if $command == "stats" { stats-command ($args | skip 1) } else if $command == "failures" { failures-command } else if $command == "inspect" { inspect-command ($args | skip 1) } else if $command == "uninstall" { uninstall } else if $command == "codex" {
+    if $command in ["help", "--help", "-h"] { print-help } else if $command == "version" { version } else if $command == "models" {
+        print "MiMo models:"
+        model-records | table
+        print ""
+        print "Meta models:"
+        meta-model-records | table
+    } else if $command == "setup" { setup } else if $command == "doctor" { doctor ($args | skip 1) } else if $command == "key" { key-command ($args | skip 1) } else if $command == "checkpoint" { checkpoint-command ($args | skip 1) } else if $command == "watch" { watch-command ($args | skip 1) } else if $command == "status" { status-command } else if $command == "queue" { queue-command } else if $command == "stats" { stats-command ($args | skip 1) } else if $command == "failures" { failures-command } else if $command == "inspect" { inspect-command ($args | skip 1) } else if $command == "uninstall" { uninstall } else if $command == "codex" {
         let rest = ($args | skip 1)
         let selected = ($rest | first | default "pro")
         if $selected == "standard" { launch-codex (provider-data).models.standard ($rest | skip 1) } else if $selected == "pro" { launch-codex (provider-data).models.pro ($rest | skip 1) } else { launch-codex (provider-data).models.pro $rest }
+    } else if $command == "meta" {
+        let rest = ($args | skip 1)
+        let sub = ($rest | first | default "")
+        if $sub == "run" {
+            meta-run-command ($rest | skip 1)
+        } else if $sub == "contributor" {
+            let sub2 = ($rest | skip 1 | first | default "")
+            if $sub2 == "run" {
+                meta-run-command ($rest | skip 2)
+            } else {
+                print "Usage: m2c meta contributor run \"task\""
+            }
+        } else if $sub == "setup" {
+            meta-setup-command
+        } else if $sub == "doctor" {
+            meta-doctor-command ($rest | skip 1)
+        } else if $sub == "key" {
+            meta-key-command ($rest | skip 1)
+        } else {
+            print "Meta backend commands:"
+            print "  m2c meta run \"task\"        run with Meta Muse Spark contributor"
+            print "  m2c meta contributor run \"task\"  explicit contributor profile"
+            print "  m2c meta setup              configure Meta backend"
+            print "  m2c meta doctor [--live]    diagnose Meta configuration"
+            print "  m2c meta key status         show Meta credential status"
+            print "  m2c meta key replace        replace Meta credential"
+            print "  m2c meta key remove         remove Meta credential"
+        }
     } else if $command == "run" { run-worker-command (provider-data).models.pro ($args | skip 1) } else if $command == "packet" { packet-command (provider-data).models.standard ($args | skip 1) } else if $command == "pro" {
         if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.pro ($args | skip 2) } else if (($args | length) > 1) and (($args | get 1) == "packet") { packet-command (provider-data).models.pro ($args | skip 2) } else { launch-worker-interactive (provider-data).models.pro }
     } else if $command == "standard" {
         if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.standard ($args | skip 2) } else if (($args | length) > 1) and (($args | get 1) == "packet") { packet-command (provider-data).models.standard ($args | skip 2) } else { launch-worker-interactive (provider-data).models.standard }
     } else { launch-worker-interactive (provider-data).models.pro }
+}
+
+def meta-run-command [args: list<string>] {
+    let parsed = (parse-run-args $args)
+    if ($parsed.workstream != null) and (not (valid-workstream $parsed.workstream)) { error make {msg: "Invalid workstream name"} }
+    let state = (if ($parsed.workstream == null) { null } else { read-workstream $parsed.workstream })
+    let resolved = (meta-resolve-profile "contributor")
+    if (not $resolved.ok) { error make {msg: $resolved.reason} }
+    let model = $resolved.model
+    let prompt = $"($parsed.task)(worker-context-prefix $state)\n\nReturn a concise completion report with files changed, tests run and results, unresolved issues, and any evidence needed for verification."
+    let agent = (worker-agent $parsed.task)
+    let previous_agent = (if $state == null { null } else { $state.agent? | default null })
+    let session_id = (if $state == null { null } else { $state.session_id? | default null })
+    let fork = (worker-fork-required $session_id $previous_agent $agent)
+    let run = (meta-worker-run $model $prompt $parsed.workstream $parsed.packet $session_id $parsed.quiet $agent $fork)
+    let summary = $run.summary
+    if ($parsed.workstream != null) {
+        let old_generation = ($state.checkpoint_generation? | default 0)
+        let new_state = {
+            name: $parsed.workstream
+            cwd: (pwd | path expand)
+            model: $model
+            agent: $agent
+            session_id: $summary.session_id
+            created_at: ($state.created_at? | default (iso-now))
+            updated_at: (iso-now)
+            last_packet: $parsed.packet
+            context_estimate_tokens: $summary.context_estimate_tokens
+            context_percent: $summary.context_percent
+            checkpoint_generation: $old_generation
+            checkpoint: ($state.checkpoint? | default null)
+        }
+        save-workstream $new_state
+    }
+    if $parsed.json { print ($summary | to json -r) } else {
+        if ($summary.final_text | is-not-empty) { print $summary.final_text }
+    }
+    if $summary.status != "completed" { exit (if $summary.exit_code == 0 { 1 } else { $summary.exit_code }) }
+}
+
+def meta-setup-command [] {
+    let opencode = (opencode-version)
+    print "Meta Muse Spark Backend Setup"
+    print $"Nushell ............. OK
+Platform ............. ($nu.os-info.name)
+OpenCode ............. ($opencode)
+Meta configuration ... installing"
+    if $opencode == "missing" { print "OpenCode is missing. Install it with: npm install -g opencode-ai" }
+    mkdir (state-root)
+    let status = (meta-credential-status)
+    if $status != "configured" {
+        print ""
+        let value = ((input --suppress-output "Meta MODEL_API_KEY: ") | str trim)
+        if not (meta-valid-key $value) { error make {msg: "The Meta credential must be non-empty."} }
+        meta-write-credential $value
+        print "Meta credential stored locally."
+    } else { print "Meta credential already configured; leaving it unchanged." }
+    let skill = (install-meta-skill)
+    print $"Meta skill ......... ($skill)"
+    let resolved = (meta-resolve-profile "contributor")
+    print $"muse-spark-1.3-contributor ......... OK"
+    print ""
+    print "Meta backend ready."
+}
+
+def meta-doctor-command [args: list<string>] {
+    let live = ($args | any {|arg| $arg == "--live"})
+    let meta_cred = (meta-credential-info)
+    let meta_skill = (skill-root | path join "meta-worker" | path join "SKILL.md")
+    let catalog = (catalogue-data).models
+    let meta_in_catalog = ($catalog | any {|m| $m.slug == "muse-spark-1.3-contributor"})
+    let meta_config_exists = ((config-path "meta.json") | path exists)
+    let opencode = (opencode-version)
+    let resolved = (meta-resolve-profile "contributor")
+    let rows = [
+        (check-row "Meta Backend" "OPTIONAL" "Meta Muse Spark 1.3 Contributor")
+        (check-row "Meta config" (if $meta_config_exists { "PASS" } else { "FAIL" }) (config-path "meta.json"))
+        (check-row "Meta Credential" $meta_cred.status $meta_cred.source)
+        (check-row "Meta catalogue" (if $meta_in_catalog { "PASS" } else { "FAIL" }) "muse-spark-1.3-contributor")
+        (check-row "Meta profile resolve" (if $resolved.ok { "PASS" } else { "FAIL" }) (if $resolved.ok { $resolved.model } else { $resolved.reason }))
+        (check-row "OpenCode" (if ($opencode == "missing") { "FAIL" } else { "PASS" }) $opencode)
+        (check-row "Meta Codex skill" (if ($meta_skill | path exists) { "PASS" } else { "FAIL" }) $meta_skill)
+    ]
+    print ($rows | table)
+    let all_pass = ($rows | where {|row| $row.status == "FAIL"} | length) == 0
+    if (not $all_pass) { print "Meta backend has issues. Run: m2c meta setup" }
+}
+
+def meta-key-command [args: list<string>] {
+    let action = ($args | first | default "status")
+    if $action == "status" { print (meta-credential-info) } else if $action == "replace" {
+        let value = ((input --suppress-output "Meta MODEL_API_KEY: ") | str trim)
+        if not (meta-valid-key $value) { error make {msg: "The Meta credential must be non-empty."} }
+        meta-write-credential $value
+        print "Meta credential replaced locally."
+    } else if $action == "remove" {
+        let credential_path = (state-path "meta-credential")
+        if ($credential_path | path exists) { rm $credential_path }
+        print "Meta stored credential removed."
+    } else { error make {msg: "Unknown meta key command. Use status, replace, or remove."} }
 }

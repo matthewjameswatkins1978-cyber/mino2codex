@@ -1,0 +1,20 @@
+{
+  "provider": {
+    "id": "meta",
+    "name": "Meta Model API",
+    "endpoint": "https://api.meta.ai/v1",
+    "protocol": "responses",
+    "env_key": "MODEL_API_KEY",
+    "requires_openai_auth": true,
+    "context_window": 1048576,
+    "web_search": "disabled"
+  },
+  "profiles": {
+    "contributor": {
+      "model": "muse-spark-1.3-contributor",
+      "reasoning_effort": "high",
+      "description": "Meta Muse Spark 1.3 Contributor tier"
+    }
+  },
+  "default_profile": "contributor"
+}
