@@ -940,8 +940,8 @@ def print-help [] {
     print "  m2c inspect <job-id>        show flight recorder timeline for a job"
     print "  m2c doctor --recent         diagnose and show recent job health"
     print "  m2c watch                   watch GitHub (one job, then return)"
-    print "  m2c watch --stay             persistent watcher"
-    print "  m2c watch --stay --jobs 2    persistent watcher with 2 slots (requires --stay, max 3)"
+    print "  m2c watch --stay             persistent watcher (3 concurrent slots)"
+    print "  m2c watch --stay --jobs N    persistent watcher with N slots (1-3)"
     print "  m2c watch --check            one non-waiting poll, exit if no jobs"
     print "  m2c watch --once             backward-compatible alias for --check"
     print "  m2c key replace             replace the locally stored credential"
@@ -1621,9 +1621,13 @@ def watch-exit-for-category [category: string] {
     if $category == "DONE" { 0 } else { 1 }
 }
 
-def watch-parse-jobs [args: list<string>] {
+def watch-max-resident [] { 3 }
+
+def watch-parse-jobs [args: list<string> stay: bool] {
     let jobs_idx = ($args | enumerate | where item == "--jobs" | first | get index? | default null)
-    if ($jobs_idx == null) { 1 } else {
+    if ($jobs_idx == null) {
+        if $stay { watch-max-resident } else { 1 }
+    } else {
         let val_idx = ($jobs_idx + 1)
         if $val_idx >= ($args | length) { error make {msg: "--jobs requires a number (1-3)"} }
         let val = ($args | get $val_idx | into int)
@@ -1640,7 +1644,7 @@ def watch-command [args: list<string>] {
     let stay = ($args | any {|arg| $arg == "--stay"})
     let check = ($args | any {|arg| $arg == "--check"})
     let once = ($args | any {|arg| $arg == "--once"})
-    let max_slots = (watch-parse-jobs $args)
+    let max_slots = (watch-parse-jobs $args $stay)
     if ($max_slots > 1) and (not $stay) {
         print "--jobs requires --stay"
         return
@@ -1659,7 +1663,9 @@ def watch-command [args: list<string>] {
             let available_slots = ($max_slots - ($active_jobs | length))
             if $available_slots > 0 {
                 let jobs = (watch-gh-find-job $login)
-                for job in ($jobs | first $available_slots) {
+                mut admitted = 0
+                for job in $jobs {
+                    if $admitted >= $available_slots { break }
                     let admission = (watch-admit-job $job $login)
                     if $admission.ok {
                         let jobspec = $admission.jobspec
@@ -1720,6 +1726,7 @@ def watch-command [args: list<string>] {
                                     child_tag: $child_tag
                                 }
                                 $active_jobs = ($active_jobs | append $runner_record)
+                                $admitted = $admitted + 1
                             } else {
                                 print "Failed to claim job."
                             }

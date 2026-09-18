@@ -1209,20 +1209,32 @@ let results = [
         let result = (watch-slot-acquire $active "repo1:branch1" 2)
         assert $result.ok "empty slots allow"
     })
-    (test "watch-parse-jobs defaults to 1" {
-        let result = (watch-parse-jobs ["--stay"])
-        assert-equal $result 1 "default jobs is 1"
+    (test "watch-parse-jobs defaults to 3 with --stay" {
+        let result = (watch-parse-jobs ["--stay"] true)
+        assert-equal $result 3 "default jobs with --stay is 3"
+    })
+    (test "watch-parse-jobs defaults to 1 without --stay" {
+        let result = (watch-parse-jobs [] false)
+        assert-equal $result 1 "default jobs without --stay is 1"
     })
     (test "watch-parse-jobs parses --jobs 2" {
-        let result = (watch-parse-jobs ["--stay" "--jobs" "2"])
+        let result = (watch-parse-jobs ["--stay" "--jobs" "2"] true)
         assert-equal $result 2 "jobs 2 parsed"
     })
+    (test "watch-parse-jobs parses --jobs 1" {
+        let result = (watch-parse-jobs ["--stay" "--jobs" "1"] true)
+        assert-equal $result 1 "jobs 1 parsed"
+    })
+    (test "watch-parse-jobs parses --jobs 3" {
+        let result = (watch-parse-jobs ["--stay" "--jobs" "3"] true)
+        assert-equal $result 3 "jobs 3 parsed"
+    })
     (test "watch-parse-jobs rejects --jobs 4" {
-        let result = (try { watch-parse-jobs ["--jobs" "4"]; "unexpected" } catch { "blocked" })
+        let result = (try { watch-parse-jobs ["--jobs" "4"] true; "unexpected" } catch { "blocked" })
         assert-equal $result "blocked" "jobs 4 rejected"
     })
     (test "watch-parse-jobs rejects --jobs 0" {
-        let result = (try { watch-parse-jobs ["--jobs" "0"]; "unexpected" } catch { "blocked" })
+        let result = (try { watch-parse-jobs ["--jobs" "0"] true; "unexpected" } catch { "blocked" })
         assert-equal $result "blocked" "jobs 0 rejected"
     })
     # --- jobspec normalization ---
@@ -1687,6 +1699,63 @@ let results = [
         let active = ["r1:b1" "r2:b2"]
         let result = (watch-slot-acquire $active "r3:b3" 3)
         assert $result.ok "3rd slot allowed with max 3"
+    })
+    # --- resident watcher capacity tests ---
+    (test "m2c watch --stay defaults to capacity 3" {
+        let result = (watch-parse-jobs ["--stay"] true)
+        assert-equal $result 3 "--stay defaults to 3"
+    })
+    (test "--jobs 1 restricts capacity to 1" {
+        let result = (watch-parse-jobs ["--stay" "--jobs" "1"] true)
+        assert-equal $result 1 "--jobs 1 restricts to 1"
+    })
+    (test "--jobs 2 restricts capacity to 2" {
+        let result = (watch-parse-jobs ["--stay" "--jobs" "2"] true)
+        assert-equal $result 2 "--jobs 2 restricts to 2"
+    })
+    (test "--jobs 3 restricts capacity to 3" {
+        let result = (watch-parse-jobs ["--stay" "--jobs" "3"] true)
+        assert-equal $result 3 "--jobs 3 restricts to 3"
+    })
+    (test "fourth independent runner is never admitted at capacity 3" {
+        let active = ["r1:b1" "r2:b2" "r3:b3"]
+        let result = (watch-slot-acquire $active "r4:b4" 3)
+        assert (not $result.ok) "4th runner rejected when 3 slots full"
+        let active2 = ["r1:b1" "r2:b2" "r3:b3"]
+        let result2 = (watch-slot-acquire $active2 "r5:b5" 3)
+        assert (not $result2.ok) "5th runner also rejected"
+    })
+    (test "same repo+branch remains queued while active" {
+        let active = ["alice/repo:feature/branch"]
+        let result = (watch-slot-acquire $active "alice/repo:feature/branch" 3)
+        assert (not $result.ok) "same repo+branch blocked while active"
+        let active2 = ["alice/repo:feature/branch" "bob/repo:other/branch"]
+        let result2 = (watch-slot-acquire $active2 "alice/repo:feature/branch" 3)
+        assert (not $result2.ok) "same repo+branch blocked even with available slot"
+    })
+    (test "independent work behind conflicting job can be admitted" {
+        let active = ["alice/repo:feature/a"]
+        let conflict = (watch-slot-acquire $active "alice/repo:feature/a" 3)
+        assert (not $conflict.ok) "conflicting job blocked"
+        let independent = (watch-slot-acquire $active "bob/repo:feature/b" 3)
+        assert $independent.ok "independent job admitted"
+        let active_after = ($active | append "bob/repo:feature/b")
+        let independent2 = (watch-slot-acquire $active_after "carol/repo:feature/c" 3)
+        assert $independent2.ok "second independent job admitted"
+        let still_blocked = (watch-slot-acquire $active_after "alice/repo:feature/a" 3)
+        assert (not $still_blocked.ok) "conflicting job still blocked"
+    })
+    (test "freed slot allows new eligible job" {
+        let active_full = ["r1:b1" "r2:b2" "r3:b3"]
+        let full_result = (watch-slot-acquire $active_full "r4:b4" 3)
+        assert (not $full_result.ok) "full capacity rejects new job"
+        let active_freed = ["r1:b1" "r2:b2"]
+        let freed_result = (watch-slot-acquire $active_freed "r4:b4" 3)
+        assert $freed_result.ok "freed slot accepts new job"
+    })
+    (test "ordinary m2c watch defaults to 1 job and returns" {
+        let result = (watch-parse-jobs [] false)
+        assert-equal $result 1 "non-stay defaults to 1"
     })
     # --- same repo+branch cannot overlap ---
     (test "same resource key rejected even with available slots" {
