@@ -599,7 +599,7 @@ def live-panel-state [active_jobs: list max_slots: int queued_count: int] {
         let closeout_wall = ($job.started_at + ($soft_s | into duration --unit sec))
         let deadline_wall = ($job.started_at + ($hard_s | into duration --unit sec))
         {
-            title: $job.original_title
+            title: (resolve-description $job.jobspec)
             profile: (if $job.jobspec.profile == "pro" { "MiMo Pro" } else { "MiMo Standard" })
             phase: (if $job.closeout_started { "CLOSEOUT" } else { "WORKING" })
             elapsed_seconds: $elapsed_s
@@ -1724,6 +1724,28 @@ def watch-exit-for-category [category: string] {
     if $category == "DONE" { 0 } else { 1 }
 }
 
+def clean-title-prefix [title: string] {
+    $title | str replace --regex '^\[M2C\s+[A-Z_]+\]\s*' '' | str trim
+}
+
+def sanitize-description [text: string] {
+    let cleaned = ($text | str replace --regex '[\r\n\t]' ' ' | str replace --all --regex '\s+' ' ' | str trim)
+    if ($cleaned | is-empty) { null } else if (($cleaned | str length) > 72) { ($cleaned | str substring 0..71) + "…" } else { $cleaned }
+}
+
+def resolve-description [jobspec: record] {
+    let raw_desc = ($jobspec.description? | default null)
+    let cleaned = (if ($raw_desc != null) { sanitize-description $raw_desc } else { null })
+    if ($cleaned != null) { $cleaned } else {
+        let title = ($jobspec.title? | default "")
+        if ($title | is-not-empty) { $title } else {
+            let repo = ($jobspec.repo? | default "?")
+            let issue = ($jobspec.issue_number? | default 0)
+            $"($repo) #($issue)"
+        }
+    }
+}
+
 def watch-max-resident [] { 3 }
 
 def watch-parse-jobs [args: list<string> stay: bool] {
@@ -1792,7 +1814,7 @@ def watch-command [args: list<string>] {
                         let slot_check = (watch-slot-acquire ($active_jobs | each {|j| $j.resource_key}) $resource_key $max_slots)
                         if $slot_check.ok {
                             let original_title = ($jobspec.title | str replace --regex '^\[M2C QUEUED\]\s*' '' | str trim)
-                            if not $tty_on { print $"Claiming job: ($original_title)" }
+                            if not $tty_on { print $"Claiming job: (resolve-description $jobspec)" }
                             if (watch-claim-job $jobspec.repo $jobspec.issue_number $original_title) {
                                 let job_id = (worker-job-id)
                                 let runtime_jobspec = ($jobspec | insert job_id $job_id | upsert title $original_title)
@@ -2130,8 +2152,12 @@ def status-command [] {
             let manifest = (flight-read-manifest $job_id)
             if ($result != null) {
                 let dur = (human-duration ($result.duration_seconds? | default 0))
-                {job: $job_id, repo: ($result.repo? | default "?"), profile: ($result.profile? | default "?"), category: ($result.category? | default "?"), duration: $dur, files: ($result.changed_file_count? | default 0)}
-            } else if ($manifest != null) { {job: $job_id, repo: ($manifest.repo? | default "?"), profile: ($manifest.profile? | default "?"), category: "RUNNING", duration: "-", files: "-"} } else { {job: $job_id, repo: "?", profile: "?", category: "UNKNOWN", duration: "-", files: "-"} }
+                let desc = (resolve-description {repo: ($result.repo? | default "?"), issue_number: ($result.issue_number? | default 0), title: ($result.title? | default ""), description: ($result.description? | default null)})
+                {job: $job_id, description: $desc, profile: ($result.profile? | default "?"), category: ($result.category? | default "?"), duration: $dur, files: ($result.changed_file_count? | default 0)}
+            } else if ($manifest != null) {
+                let desc = (resolve-description {repo: ($manifest.repo? | default "?"), issue_number: ($manifest.issue_number? | default 0), title: ($manifest.title? | default ""), description: ($manifest.description? | default null)})
+                {job: $job_id, description: $desc, profile: ($manifest.profile? | default "?"), category: "RUNNING", duration: "-", files: "-"}
+            } else { {job: $job_id, description: "?", profile: "?", category: "UNKNOWN", duration: "-", files: "-"} }
         })
         print $"Recent jobs (showing ($recent | length) of ($jobs | length) total):"
         print ($rows | table)
@@ -2154,6 +2180,8 @@ def inspect-command [args: list<string>] {
     let manifest = (flight-read-manifest $job_id)
     if ($manifest == null) { error make {msg: $"No manifest found for job ($job_id)"} }
     print $"Job: ($job_id)"
+    let desc = (resolve-description {repo: ($manifest.repo? | default "?"), issue_number: ($manifest.issue_number? | default 0), title: ($manifest.title? | default ""), description: ($manifest.description? | default null)})
+    print $"Description: ($desc)"
     print $"Repo: ($manifest.repo? | default "?")"
     print $"Title: ($manifest.title? | default "?")"
     print $"Worker: ($manifest.worker? | default "?") / ($manifest.profile? | default "?")"

@@ -2638,7 +2638,7 @@ let results = [
     })
     (test "live-panel-state derives free capacity from max minus active" {
         let now = (date now)
-        let job1 = {job_id: "j1", original_title: "Job A", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r1:b1", job_dir: "/tmp/j1", child_job: null, child_tag: 1, admission: {}}
+        let job1 = {job_id: "j1", original_title: "Job A", jobspec: {profile: "standard", title: "Job A"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r1:b1", job_dir: "/tmp/j1", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job1] 3 2)
         assert-equal ($state.active | length) 1 "one active"
         assert-equal $state.free 2 "2 free slots"
@@ -2646,31 +2646,31 @@ let results = [
     })
     (test "live-panel-state shows WORKING phase when not in closeout" {
         let now = (date now)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "pro"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "pro", title: "Test"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         assert-equal ($state.active.0.phase) "WORKING" "working phase"
     })
     (test "live-panel-state shows CLOSEOUT phase when in closeout" {
         let now = (date now)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: true, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard", title: "Test"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: true, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         assert-equal ($state.active.0.phase) "CLOSEOUT" "closeout phase"
     })
     (test "live-panel-state derives MiMo Pro profile display" {
         let now = (date now)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "pro"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "pro", title: "Test"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         assert-equal ($state.active.0.profile) "MiMo Pro" "pro profile"
     })
     (test "live-panel-state derives MiMo Standard profile display" {
         let now = (date now)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard", title: "Test"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         assert-equal ($state.active.0.profile) "MiMo Standard" "standard profile"
     })
     (test "live-panel-state elapsed is derived from actual started_at" {
         let started = ((date now) - 738sec)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $started, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard", title: "Test"}, started_at: $started, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         assert ($state.active.0.elapsed_seconds >= 737) "elapsed at least 737s"
         assert ($state.active.0.elapsed_seconds <= 740) "elapsed at most 740s"
@@ -2680,7 +2680,7 @@ let results = [
         let budget_minutes = 20
         let soft_ns = (soft-deadline-ns $budget_minutes)
         let hard_ns = (watchdog-limit-from-budget $budget_minutes)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $started, soft_deadline_ns: $soft_ns, hard_deadline_ns: $hard_ns, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard", title: "Test"}, started_at: $started, soft_deadline_ns: $soft_ns, hard_deadline_ns: $hard_ns, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         let expected_soft = ($started + ($soft_ns / 1000000000 | math round | into int | into duration --unit sec))
         let expected_hard = ($started + ($hard_ns / 1000000000 | math round | into int | into duration --unit sec))
@@ -2696,7 +2696,7 @@ let results = [
         assert (($frame | first) | str contains "watching") "header contains watching"
         assert (($frame | first) | str contains "0 active") "header shows 0 active"
         assert (($frame | first) | str contains "1 queued") "header shows 1 queued"
-        assert (($frame | first) | str contains "0.2.3") "header contains version"
+        assert (($frame | first) | str contains "0.2.4") "header contains version"
     })
     (test "live-panel-frame shows active job details" {
         let now = (date now)
@@ -2764,7 +2764,7 @@ let results = [
     # --- live panel: no fake telemetry ---
     (test "live-panel-state has no percentage complete" {
         let now = (date now)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard", title: "Test"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         let active = ($state.active.0)
         assert (not ($active | columns | any {|c| $c == "percent"})) "no percent field"
@@ -2784,7 +2784,7 @@ let results = [
     # --- live panel: phase labels only from mechanical state ---
     (test "live-panel-state phase is only WORKING or CLOSEOUT" {
         let now = (date now)
-        let working = {job_id: "j1", original_title: "T", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let working = {job_id: "j1", original_title: "T", jobspec: {profile: "standard", title: "T"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let closeout = ($working | merge {closeout_started: true})
         let s1 = (live-panel-state [$working] 3 0)
         let s2 = (live-panel-state [$closeout] 3 0)
@@ -2827,8 +2827,8 @@ let results = [
         }
     })
     # --- live panel: version value is 0.2.3 ---
-    (test "version-value returns 0.2.3" {
-        assert-equal (version-value) "0.2.3" "version bumped"
+    (test "version-value returns 0.2.4" {
+        assert-equal (version-value) "0.2.4" "version bumped"
     })
     # --- live panel: queue count reflects controller truth ---
     (test "live-panel-state queued count passes through from controller" {
@@ -2841,7 +2841,7 @@ let results = [
     (test "live-panel-state free slots is max minus active count" {
         let now = (date now)
         let make_job = {|id|
-            {job_id: $id, original_title: $"Job ($id)", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: $"r($id):b($id)", job_dir: $"/tmp/($id)", child_job: null, child_tag: 1, admission: {}}
+            {job_id: $id, original_title: $"Job ($id)", jobspec: {profile: "standard", title: $"Job ($id)"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: $"r($id):b($id)", job_dir: $"/tmp/($id)", child_job: null, child_tag: 1, admission: {}}
         }
         let j1 = (do $make_job "a")
         let j2 = (do $make_job "b")
@@ -2850,6 +2850,111 @@ let results = [
         assert-equal (live-panel-state [$j1] 3 0).free 2 "1 job = 2 free"
         assert-equal (live-panel-state [$j1 $j2] 3 0).free 1 "2 jobs = 1 free"
         assert-equal (live-panel-state [$j1 $j2 $j3] 3 0).free 0 "3 jobs = 0 free"
+    })
+    # --- description resolution ---
+    (test "explicit description wins over title" {
+        let jobspec = {repo: "alice/repo", issue_number: 7, title: "[M2C QUEUED] Fix auth", description: "Add OAuth2 support"}
+        assert-equal (resolve-description $jobspec) "Add OAuth2 support" "explicit description used"
+    })
+    (test "missing description falls back to title" {
+        let jobspec = {repo: "alice/repo", issue_number: 7, title: "Fix auth bug", description: null}
+        assert-equal (resolve-description $jobspec) "Fix auth bug" "title used when no description"
+    })
+    (test "final fallback is repo and issue when title is empty" {
+        let jobspec = {repo: "alice/repo", issue_number: 42, title: "", description: null}
+        assert-equal (resolve-description $jobspec) "alice/repo #42" "repo #issue fallback"
+    })
+    (test "blank description behaves as missing" {
+        let jobspec = {repo: "alice/repo", issue_number: 5, title: "Test job", description: "   "}
+        assert-equal (resolve-description $jobspec) "Test job" "blank description ignored"
+    })
+    (test "whitespace-only description behaves as missing" {
+        let jobspec = {repo: "alice/repo", issue_number: 3, title: "Ship it", description: "\t\n  "}
+        assert-equal (resolve-description $jobspec) "Ship it" "whitespace description ignored"
+    })
+    (test "description is bounded to 72 characters with ellipsis" {
+        let long_desc = ("a" | fill -a right -w 100 -c 'a')
+        let jobspec = {repo: "alice/repo", issue_number: 1, title: "Test", description: $long_desc}
+        let resolved = (resolve-description $jobspec)
+        assert (($resolved | str length) <= 75) "bounded to 72 + ellipsis (75 bytes)"
+        assert ($resolved | str ends-with "…") "ends with ellipsis"
+    })
+    (test "description sanitizes newlines and tabs" {
+        let jobspec = {repo: "alice/repo", issue_number: 1, title: "Test", description: "Fix\nthe\tbug\rproperly"}
+        assert-equal (resolve-description $jobspec) "Fix the bug properly" "newlines and tabs replaced"
+    })
+    (test "all M2C title prefixes are stripped for fallback" {
+        let cases = [
+            {input: "[M2C QUEUED] Test", expected: "Test"}
+            {input: "[M2C RUNNING] Test", expected: "Test"}
+            {input: "[M2C DONE] Test", expected: "Test"}
+            {input: "[M2C FAILED] Test", expected: "Test"}
+            {input: "[M2C BLOCKED] Test", expected: "Test"}
+            {input: "[M2C TIMED_OUT] Test", expected: "Test"}
+        ]
+        for case in $cases {
+            assert-equal (clean-title-prefix $case.input) $case.expected $"prefix stripped: ($case.input)"
+        }
+    })
+    (test "clean-title-prefix removes M2C RUNNING prefix" {
+        assert-equal (clean-title-prefix "[M2C RUNNING] Fix auth") "Fix auth" "RUNNING stripped"
+    })
+    (test "clean-title-prefix removes M2C QUEUED prefix" {
+        assert-equal (clean-title-prefix "[M2C QUEUED] Fix auth") "Fix auth" "QUEUED stripped"
+    })
+    (test "clean-title-prefix leaves clean title unchanged" {
+        assert-equal (clean-title-prefix "Fix auth bug") "Fix auth bug" "clean title preserved"
+    })
+    (test "sanitize-description collapses multiple spaces" {
+        assert-equal (sanitize-description "Fix  the   bug") "Fix the bug" "spaces collapsed"
+    })
+    (test "sanitize-description trims leading and trailing whitespace" {
+        assert-equal (sanitize-description "  Fix auth  ") "Fix auth" "trimmed"
+    })
+    (test "sanitize-description returns null for empty string" {
+        assert (null == (sanitize-description "")) "empty returns null"
+    })
+    (test "sanitize-description returns null for whitespace-only string" {
+        assert (null == (sanitize-description "   ")) "whitespace returns null"
+    })
+    (test "live-panel-state uses resolved description from jobspec" {
+        let now = (date now)
+        let job = {job_id: "j1", original_title: "Fix auth", jobspec: {profile: "standard", repo: "alice/repo", issue_number: 7, title: "Fix auth", description: "Add OAuth2"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        assert-equal $state.active.0.title "Add OAuth2" "explicit description used in panel"
+    })
+    (test "live-panel-state falls back to title when no description" {
+        let now = (date now)
+        let job = {job_id: "j1", original_title: "Fix auth", jobspec: {profile: "standard", repo: "alice/repo", issue_number: 7, title: "Fix auth"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        assert-equal $state.active.0.title "Fix auth" "title used"
+    })
+    (test "live-panel-state falls back to repo #issue when no description and empty title" {
+        let now = (date now)
+        let job = {job_id: "j1", original_title: "", jobspec: {profile: "standard", repo: "alice/repo", issue_number: 7, title: ""}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        assert-equal $state.active.0.title "alice/repo #7" "repo #issue fallback"
+    })
+    (test "live-panel-frame shows description once without scroll growth" {
+        let now = (date now)
+        let job = {title: "Add OAuth2 support", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 100, closeout_at: $now, deadline_at: ($now + 60sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now}
+        let frame1 = (live-panel-frame $state)
+        let frame2 = (live-panel-frame $state)
+        assert-equal ($frame1 | length) ($frame2 | length) "frame height stable"
+        let count1 = ($frame1 | where {|line| $line | str contains "Add OAuth2 support"} | length)
+        assert-equal $count1 1 "description appears exactly once"
+    })
+    (test "live-panel-frame narrow layout remains clean with description" {
+        let now = (date now)
+        let long_title = ("A" | fill -a right -w 80 -c 'A')
+        let job = {title: $long_title, profile: "MiMo Pro", phase: "WORKING", elapsed_seconds: 100, closeout_at: $now, deadline_at: ($now + 60sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now}
+        let frame = (live-panel-frame $state)
+        assert (($frame | length) > 0) "narrow frame non-empty"
+        for line in $frame {
+            assert (($line | describe) == "string") "each line is a string"
+        }
     })
 ]
 
