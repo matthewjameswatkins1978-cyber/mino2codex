@@ -3053,6 +3053,310 @@ let results = [
         let text = ($frame | str join "\n")
         assert (not ($text | str contains (char --integer 27))) "no ANSI in redirected frame text"
     })
+    # === branch preparation regression tests (fix sequential same-branch continuation) ===
+    # test 1: no remote target branch => starts exactly at declared base
+    (test "controller-prepare-branch: fresh branch starts at declared base" {
+        let repo_dir = ($test_root | path join "prep-fresh-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-fresh-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_dir = ($test_root | path join "prep-fresh-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let prep = (controller-prepare-branch $clone_dir "mimo/fresh" $base_sha "prep-test-001")
+        assert $prep.ok "fresh branch preparation succeeds"
+        assert-equal $prep.effective_start_sha $base_sha "effective start SHA equals declared base"
+        assert (not $prep.remote_existed) "remote did not exist"
+        assert-equal $prep.remote_start_sha "" "no remote start SHA"
+        let head_sha = ((run-external "git" "-C" $clone_dir "rev-parse" "HEAD" | complete).stdout | str trim)
+        assert-equal $head_sha $base_sha "HEAD is at declared base"
+        let current_branch = ((run-external "git" "-C" $clone_dir "branch" "--show-current" | complete).stdout | str trim)
+        assert-equal $current_branch "mimo/fresh" "on correct branch"
+    })
+    # test 2: remote target branch equal to base => resumes correctly
+    (test "controller-prepare-branch: remote equal to base resumes at remote head" {
+        let repo_dir = ($test_root | path join "prep-equal-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-equal-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/equal" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/equal" | complete) | ignore
+        let clone_dir = ($test_root | path join "prep-equal-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let prep = (controller-prepare-branch $clone_dir "mimo/equal" $base_sha "prep-test-002")
+        assert $prep.ok "remote-equal branch preparation succeeds"
+        assert-equal $prep.effective_start_sha $base_sha "effective start SHA equals remote head"
+        assert $prep.remote_existed "remote existed"
+        assert-equal $prep.remote_start_sha $base_sha "remote start SHA equals base"
+    })
+    # test 3: remote target branch ahead of base => starts at remote head
+    (test "controller-prepare-branch: remote ahead of base starts at remote head" {
+        let repo_dir = ($test_root | path join "prep-ahead-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-ahead-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/ahead" | complete) | ignore
+        ("# work from job A" | save --force ($work | path join "WORK.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "job A work" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/ahead" | complete) | ignore
+        let remote_head = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        assert ($remote_head != $base_sha) "remote head is different from base"
+        let clone_dir = ($test_root | path join "prep-ahead-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let prep = (controller-prepare-branch $clone_dir "mimo/ahead" $base_sha "prep-test-003")
+        assert $prep.ok "remote-ahead branch preparation succeeds"
+        assert-equal $prep.effective_start_sha $remote_head "effective start SHA is remote head, not stale base"
+        assert $prep.remote_existed "remote existed"
+        assert-equal $prep.remote_start_sha $remote_head "remote start SHA is remote head"
+        let head_sha = ((run-external "git" "-C" $clone_dir "rev-parse" "HEAD" | complete).stdout | str trim)
+        assert-equal $head_sha $remote_head "HEAD is at remote head, not stale base"
+    })
+    # test 4: sequential job B sees commit pushed by job A
+    (test "controller-prepare-branch: sequential job B resumes from job A push" {
+        let repo_dir = ($test_root | path join "prep-seq-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-seq-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/seq" | complete) | ignore
+        ("# job A work" | save --force ($work | path join "A.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "job A" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/seq" | complete) | ignore
+        let job_a_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_b = ($test_root | path join "prep-seq-clone-b")
+        (run-external "git" "clone" $repo_dir $clone_b | complete) | ignore
+        let prep_b = (controller-prepare-branch $clone_b "mimo/seq" $base_sha "prep-test-004")
+        assert $prep_b.ok "job B preparation succeeds"
+        assert-equal $prep_b.effective_start_sha $job_a_sha "job B starts at job A's push, not stale base"
+        assert $prep_b.remote_existed "remote existed for job B"
+        let head_b = ((run-external "git" "-C" $clone_b "rev-parse" "HEAD" | complete).stdout | str trim)
+        assert-equal $head_b $job_a_sha "job B HEAD is at job A's push"
+    })
+    # test 5: base not ancestor of existing remote head => fail closed
+    (test "controller-prepare-branch: base not ancestor of remote head fails closed" {
+        let repo_dir = ($test_root | path join "prep-unrelated-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-unrelated-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/unrelated" | complete) | ignore
+        ("# unrelated work" | save --force ($work | path join "UNRELATED.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "unrelated" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/unrelated" | complete) | ignore
+        let remote_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "main" | complete) | ignore
+        ("# diverged" | save --force ($work | path join "DIVERGED.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "diverge" | complete) | ignore
+        let fake_base = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        assert ($fake_base != $base_sha) "fake base is different from original"
+        let clone_dir = ($test_root | path join "prep-unrelated-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let prep = (controller-prepare-branch $clone_dir "mimo/unrelated" $fake_base "prep-test-005")
+        assert (not $prep.ok) "non-ancestor base fails closed"
+        assert ($prep.reason | str contains "not an ancestor") "reason mentions not ancestor"
+        assert $prep.remote_existed "remote existed"
+        assert-equal $prep.remote_start_sha $remote_sha "remote start SHA is reported"
+    })
+    # test 6: effective_start_sha is the single source of truth for changed-file comparison
+    (test "controller-prepare-branch: effective_start_sha differs from base when remote ahead" {
+        let repo_dir = ($test_root | path join "prep-truth-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-truth-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let old_base = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/truth" | complete) | ignore
+        ("# prior work" | save --force ($work | path join "PRIOR.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "prior" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/truth" | complete) | ignore
+        let remote_head = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_dir = ($test_root | path join "prep-truth-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let prep = (controller-prepare-branch $clone_dir "mimo/truth" $old_base "prep-test-006")
+        assert $prep.ok "preparation succeeds"
+        assert ($prep.effective_start_sha != $old_base) "effective_start_sha differs from stale declared base"
+        assert-equal $prep.effective_start_sha $remote_head "effective_start_sha equals remote head"
+    })
+    # test 7: flight recorder captures branch_prepare event
+    (test "controller-prepare-branch: flight recorder captures branch_prepare event" {
+        let repo_dir = ($test_root | path join "prep-flight-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-flight-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_dir = ($test_root | path join "prep-flight-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let job_id = "prep-flight-001"
+        let _prep = (controller-prepare-branch $clone_dir "mimo/flight" $base_sha $job_id)
+        let events = (flight-read-events $job_id)
+        assert ($events | any {|e| $e.event == "branch_prepare"}) "branch_prepare event recorded"
+        let prep_event = ($events | where {|e| $e.event == "branch_prepare"} | first)
+        assert ($prep_event.result? | is-not-empty) "result field present"
+        assert ($prep_event.effective_start_sha? | is-not-empty) "effective_start_sha present"
+    })
+    # test 8: same repo+branch serialization unchanged (resource key blocking still works)
+    (test "same repo+branch serialization unchanged after branch preparation fix" {
+        let active = ["alice/repo:mimo/branch"]
+        let slot_check = (watch-slot-acquire $active "alice/repo:mimo/branch" 3)
+        assert (not $slot_check.ok) "same resource key still blocked"
+        let different = (watch-slot-acquire $active "alice/repo:mimo/other" 3)
+        assert $different.ok "different branch still allowed"
+    })
+    # test: branch_prepare event for fresh branch has correct result
+    (test "controller-prepare-branch: fresh branch event has created_fresh result" {
+        let repo_dir = ($test_root | path join "prep-evfresh-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-evfresh-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_dir = ($test_root | path join "prep-evfresh-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let job_id = "prep-evfresh-001"
+        let _prep = (controller-prepare-branch $clone_dir "mimo/ev-fresh" $base_sha $job_id)
+        let events = (flight-read-events $job_id)
+        let prep_event = ($events | where {|e| $e.event == "branch_prepare"} | first)
+        assert-equal $prep_event.result "created_fresh" "fresh branch result is created_fresh"
+    })
+    # test: branch_prepare event for resumed branch has correct result
+    (test "controller-prepare-branch: resumed branch event has resumed_existing result" {
+        let repo_dir = ($test_root | path join "prep-evresume-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-evresume-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/ev-resume" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/ev-resume" | complete) | ignore
+        let clone_dir = ($test_root | path join "prep-evresume-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let job_id = "prep-evresume-001"
+        let _prep = (controller-prepare-branch $clone_dir "mimo/ev-resume" $base_sha $job_id)
+        let events = (flight-read-events $job_id)
+        let prep_event = ($events | where {|e| $e.event == "branch_prepare"} | first)
+        assert-equal $prep_event.result "resumed_existing" "resumed branch result is resumed_existing"
+    })
+    # test: branch_prepare event for rejected base has correct result
+    (test "controller-prepare-branch: rejected base event has rejected result" {
+        let repo_dir = ($test_root | path join "prep-evreject-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-evreject-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/ev-reject" | complete) | ignore
+        ("# work" | save --force ($work | path join "W.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "work" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/ev-reject" | complete) | ignore
+        (run-external "git" "-C" $work "checkout" "main" | complete) | ignore
+        ("# diverge" | save --force ($work | path join "D.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "diverge" | complete) | ignore
+        let fake_base = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_dir = ($test_root | path join "prep-evreject-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let job_id = "prep-evreject-001"
+        let _prep = (controller-prepare-branch $clone_dir "mimo/ev-reject" $fake_base $job_id)
+        let events = (flight-read-events $job_id)
+        let prep_event = ($events | where {|e| $e.event == "branch_prepare"} | first)
+        assert-equal $prep_event.result "rejected" "rejected base result is rejected"
+    })
+    # test: base_not_ancestor failure signature exists
+    (test "failure signature base_not_ancestor is distinct from remote_missing" {
+        let summary = {status: "failed", exit_code: 1}
+        let delivery = {worktree_clean: true, remote_exists: true, sha_match: false, branch_match: true}
+        let sig = (normalize-failure-signature $summary $delivery "DELIVERY_FAILED")
+        assert-equal $sig "remote_sha_mismatch" "non-ancestor with remote exists produces remote_sha_mismatch"
+    })
+    # test: branch_prepare record shape is complete
+    (test "controller-prepare-branch: result record has all required fields" {
+        let repo_dir = ($test_root | path join "prep-shape-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-shape-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_dir = ($test_root | path join "prep-shape-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let prep = (controller-prepare-branch $clone_dir "mimo/shape" $base_sha "prep-shape-001")
+        assert ($prep | columns | any {|c| $c == "ok"}) "ok field present"
+        assert ($prep | columns | any {|c| $c == "reason"}) "reason field present"
+        assert ($prep | columns | any {|c| $c == "branch"}) "branch field present"
+        assert ($prep | columns | any {|c| $c == "declared_base_sha"}) "declared_base_sha field present"
+        assert ($prep | columns | any {|c| $c == "effective_start_sha"}) "effective_start_sha field present"
+        assert ($prep | columns | any {|c| $c == "remote_existed"}) "remote_existed field present"
+        assert ($prep | columns | any {|c| $c == "remote_start_sha"}) "remote_start_sha field present"
+        assert-equal $prep.branch "mimo/shape" "branch value correct"
+        assert-equal $prep.declared_base_sha $base_sha "declared_base_sha value correct"
+    })
 ]
 
 print ($results | table)

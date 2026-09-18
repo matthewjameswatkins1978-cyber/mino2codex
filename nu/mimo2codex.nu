@@ -1420,6 +1420,56 @@ def controller-dispatch-worker [worker: string profile: string prompt: string wo
     }
 }
 
+def controller-prepare-branch [clone_dir: path branch: string base_sha: string job_id: string] {
+    let remote_ref = $"remotes/origin/($branch)"
+    let remote_probe = (do { run-external "git" "-C" $clone_dir "rev-parse" "--verify" $remote_ref } | complete)
+    let remote_exists = ($remote_probe.exit_code == 0) and (($remote_probe.stdout | str trim | is-not-empty))
+    if $remote_exists {
+        let remote_sha = ($remote_probe.stdout | str trim)
+        let ancestor_probe = (do { run-external "git" "-C" $clone_dir "merge-base" "--is-ancestor" $base_sha $remote_sha } | complete)
+        if $ancestor_probe.exit_code != 0 {
+            flight-append-event $job_id {event: "branch_prepare", result: "rejected", reason: "base is not ancestor of remote head", base_sha: $base_sha, remote_sha: $remote_sha, branch: $branch}
+            {ok: false, reason: $"declared base ($base_sha) is not an ancestor of existing remote origin/($branch) ($remote_sha)", branch: $branch, declared_base_sha: $base_sha, effective_start_sha: "", remote_existed: true, remote_start_sha: $remote_sha}
+        } else {
+            let reset = (do { run-external "git" "-C" $clone_dir "checkout" $branch } | complete)
+            if $reset.exit_code != 0 {
+                let create_local = (do { run-external "git" "-C" $clone_dir "checkout" "-b" $branch $"origin/($branch)" } | complete)
+                if $create_local.exit_code != 0 {
+                    flight-append-event $job_id {event: "branch_prepare", result: "error", reason: $"failed to checkout or create local branch ($branch)", base_sha: $base_sha, remote_sha: $remote_sha, branch: $branch}
+                    {ok: false, reason: $"failed to checkout or create local branch ($branch)", branch: $branch, declared_base_sha: $base_sha, effective_start_sha: "", remote_existed: true, remote_start_sha: $remote_sha}
+                } else {
+                    flight-append-event $job_id {event: "branch_prepare", result: "resumed_existing", base_sha: $base_sha, effective_start_sha: $remote_sha, remote_sha: $remote_sha, branch: $branch}
+                    {ok: true, reason: "", branch: $branch, declared_base_sha: $base_sha, effective_start_sha: $remote_sha, remote_existed: true, remote_start_sha: $remote_sha}
+                }
+            } else {
+                let reset_hard = (do { run-external "git" "-C" $clone_dir "reset" "--hard" $remote_sha } | complete)
+                if $reset_hard.exit_code != 0 {
+                    flight-append-event $job_id {event: "branch_prepare", result: "error", reason: $"failed to reset local branch to remote head ($remote_sha)", base_sha: $base_sha, remote_sha: $remote_sha, branch: $branch}
+                    {ok: false, reason: $"failed to reset local branch ($branch) to remote head ($remote_sha)", branch: $branch, declared_base_sha: $base_sha, effective_start_sha: "", remote_existed: true, remote_start_sha: $remote_sha}
+                } else {
+                    flight-append-event $job_id {event: "branch_prepare", result: "resumed_existing", base_sha: $base_sha, effective_start_sha: $remote_sha, remote_sha: $remote_sha, branch: $branch}
+                    {ok: true, reason: "", branch: $branch, declared_base_sha: $base_sha, effective_start_sha: $remote_sha, remote_existed: true, remote_start_sha: $remote_sha}
+                }
+            }
+        }
+    } else {
+        let checkout_base = (do { run-external "git" "-C" $clone_dir "checkout" $base_sha } | complete)
+        if $checkout_base.exit_code != 0 {
+            flight-append-event $job_id {event: "branch_prepare", result: "rejected", reason: "declared base SHA does not resolve", base_sha: $base_sha, branch: $branch}
+            {ok: false, reason: $"declared base SHA ($base_sha) does not resolve", branch: $branch, declared_base_sha: $base_sha, effective_start_sha: "", remote_existed: false, remote_start_sha: ""}
+        } else {
+            let create_branch = (do { run-external "git" "-C" $clone_dir "checkout" "-b" $branch } | complete)
+            if $create_branch.exit_code != 0 {
+                flight-append-event $job_id {event: "branch_prepare", result: "error", reason: $"failed to create branch ($branch) from base", base_sha: $base_sha, branch: $branch}
+                {ok: false, reason: $"failed to create branch ($branch) from declared base ($base_sha)", branch: $branch, declared_base_sha: $base_sha, effective_start_sha: "", remote_existed: false, remote_start_sha: ""}
+            } else {
+                flight-append-event $job_id {event: "branch_prepare", result: "created_fresh", base_sha: $base_sha, effective_start_sha: $base_sha, branch: $branch}
+                {ok: true, reason: "", branch: $branch, declared_base_sha: $base_sha, effective_start_sha: $base_sha, remote_existed: false, remote_start_sha: ""}
+            }
+        }
+    }
+}
+
 def controller-runner [job_dir: path job: record packet: string] {
     let test_repo_root = ($env.M2C_TEST_REPO_ROOT? | default "" | str trim)
     let repo_url = (if ($test_repo_root | is-not-empty) {
@@ -1429,9 +1479,9 @@ def controller-runner [job_dir: path job: record packet: string] {
     })
     let clone_dir = ($job_dir | path join "repo")
     let _ = (do { run-external "git" "clone" $repo_url $clone_dir } | complete)
-    let checkout = (do { run-external "git" "-C" $clone_dir "checkout" $job.base_sha } | complete)
-    if $checkout.exit_code != 0 {
-        flight-append-event $job.job_id {event: "runner_error", reason: $"failed to checkout base SHA ($job.base_sha)"}
+    let prep = (controller-prepare-branch $clone_dir $job.branch $job.base_sha $job.job_id)
+    if not $prep.ok {
+        flight-append-event $job.job_id {event: "runner_error", reason: $"branch preparation failed: ($prep.reason)"}
         let result_record = {
             job_id: $job.job_id
             repo: $job.repo
@@ -1443,14 +1493,14 @@ def controller-runner [job_dir: path job: record packet: string] {
             budget_minutes: $job.budget_minutes
             description: $job.description
             category: "DELIVERY_FAILED"
-            failure_signature: "remote_missing"
+            failure_signature: (if $prep.remote_existed { "base_not_ancestor" } else { "remote_missing" })
             duration_seconds: 0
             exit_code: 1
             local_branch: ""
             local_sha: ""
             worktree_clean: false
-            remote_exists: false
-            remote_sha: ""
+            remote_exists: $prep.remote_existed
+            remote_sha: $prep.remote_start_sha
             sha_match: false
             branch_match: false
             changed_file_count: 0
@@ -1462,42 +1512,8 @@ def controller-runner [job_dir: path job: record packet: string] {
         flight-write-result $job.job_id $result_record
         {exit_code: 1, timed_out: false, cancelled: false, result_record: $result_record}
     } else {
-        let branch_create = (do { run-external "git" "-C" $clone_dir "checkout" "-b" $job.branch } | complete)
-        if $branch_create.exit_code != 0 {
-            let switch = (do { run-external "git" "-C" $clone_dir "checkout" $job.branch } | complete)
-            if $switch.exit_code != 0 {
-                flight-append-event $job.job_id {event: "runner_error", reason: $"failed to create or switch to branch ($job.branch)"}
-                let result_record = {
-                    job_id: $job.job_id
-                    repo: $job.repo
-                    issue_number: $job.issue_number
-                    title: $job.title
-                    worker: $job.worker
-                    profile: $job.profile
-                    mode: $job.mode
-                    budget_minutes: $job.budget_minutes
-                    description: $job.description
-                    category: "DELIVERY_FAILED"
-                    failure_signature: "branch_mismatch"
-                    duration_seconds: 0
-                    exit_code: 1
-                    local_branch: ""
-                    local_sha: ""
-                    worktree_clean: false
-                    remote_exists: false
-                    remote_sha: ""
-                    sha_match: false
-                    branch_match: false
-                    changed_file_count: 0
-                    tool_calls: 0
-                    tool_failures: 0
-                    completed_at: (iso-now-utc)
-                    closeout_ran: false
-                }
-                flight-write-result $job.job_id $result_record
-                {exit_code: 1, timed_out: false, cancelled: false, result_record: $result_record}
-            } else { controller-run-main $clone_dir $job $packet }
-        } else { controller-run-main $clone_dir $job $packet }
+        flight-append-event $job.job_id {event: "branch_ready", effective_start_sha: $prep.effective_start_sha, remote_existed: $prep.remote_existed}
+        controller-run-main $clone_dir $job $packet
     }
 }
 
@@ -1643,13 +1659,8 @@ def watch-run-worker-in-job [job_dir: path job: record] {
     let repo_url = $"https://github.com/($job.repo).git"
     let clone_dir = ($job_dir | path join "repo")
     let _ = (do { run-external "git" "clone" $repo_url $clone_dir } | complete)
-    let checkout = (do { run-external "git" "-C" $clone_dir "checkout" $job.base } | complete)
-    if $checkout.exit_code != 0 { error make {msg: $"failed to checkout base SHA ($job.base)"} }
-    let branch_create = (do { run-external "git" "-C" $clone_dir "checkout" "-b" $job.branch } | complete)
-    if $branch_create.exit_code != 0 {
-        let switch = (do { run-external "git" "-C" $clone_dir "checkout" $job.branch } | complete)
-        if $switch.exit_code != 0 { error make {msg: $"failed to create or switch to branch ($job.branch)"} }
-    }
+    let prep = (controller-prepare-branch $clone_dir $job.branch $job.base ($job.job_id? | default "watch-inline"))
+    if not $prep.ok { error make {msg: $"branch preparation failed: ($prep.reason)"} }
     let prompt = $"($job.packet)\n\nReturn a concise completion report with files changed, tests run and results, unresolved issues, and any evidence needed for verification."
     let agent = (worker-agent $job.packet)
     let budget = ($job.budget_minutes? | default 20)
