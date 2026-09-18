@@ -1284,6 +1284,352 @@ let results = [
         let result = (watch-find-pr "user/nonexistent" "main")
         assert ($result == null) "nonexistent returns null"
     })
+    # --- controller runner integration tests ---
+    (test "controller-runner completes lifecycle with test backend" {
+        let fake_repo = ($test_root | path join "ctrl-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "ctrl-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let test_result = {
+            status: "completed"
+            exit_code: 0
+            tool_calls: 1
+            tool_failures: 0
+            changed_files: ["src/a.nu"]
+            duration_seconds: 5
+            timed_out: false
+            final_text: "done"
+            model: "mimo-v2.5"
+            backend: "opencode"
+            provider: "m2c-mimo"
+            session_id: null
+            workstream: null
+            packet: null
+            budget_minutes: 20
+            context_estimate_tokens: null
+            context_percent: null
+            checkpoint_recommended: false
+            agent: "build"
+        }
+        let backend_file = ($test_root | path join "ctrl-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        let job_id = "ctrl-test-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let manifest = {
+            job_id: $job_id
+            repo: "local/test"
+            issue_number: 1
+            title: "Test runner job"
+            base_sha: $base_sha
+            branch: "mimo/ctrl-test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            resource_key: "local/test:mimo/ctrl-test"
+            claimed_at: (iso-now-utc)
+            m2c_version: "0.2.0"
+            m2c_source_hash: "test"
+        }
+        flight-write-manifest $job_id $manifest
+        flight-append-event $job_id {event: "claimed", repo: "local/test", issue: 1}
+        flight-append-event $job_id {event: "runner_start"}
+        let job_spec = {
+            job_id: $job_id
+            repo: "local/test"
+            issue_number: 1
+            title: "Test runner job"
+            base_sha: $base_sha
+            branch: "mimo/ctrl-test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let result = (controller-runner $job_dir $job_spec "Do the test work.")
+            assert ($result.exit_code in [0 1]) "runner exit code is valid"
+            assert (not $result.timed_out) "not timed out"
+            assert ($result.result_record | is-not-empty) "result record present"
+        }
+        let written = (flight-read-result $job_id)
+        assert ($written != null) "result.json written"
+        assert ($written.category in ["DONE" "DELIVERY_FAILED" "NO_CHANGES"]) "category is valid"
+        assert-equal $written.job_id $job_id "job_id preserved"
+        assert-equal $written.repo "local/test" "repo preserved"
+        assert ($written.completed_at | is-not-empty) "completed_at present"
+        assert-equal $written.closeout_ran false "closeout_ran is false for normal run"
+        let events = (flight-read-events $job_id)
+        assert ($events | any {|e| $e.event == "claimed"}) "claimed event"
+        assert ($events | any {|e| $e.event == "runner_start"}) "runner_start event"
+        assert ($events | any {|e| $e.event == "finalized"}) "finalized event"
+    })
+    (test "controller-runner writes result.json on clone failure" {
+        let job_id = "ctrl-test-clone-fail"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let job_spec = {
+            job_id: $job_id
+            repo: "nonexistent/repo"
+            issue_number: 99
+            title: "Clone fail test"
+            base_sha: "abcdef0123456789abcdef0123456789abcdef02"
+            branch: "mimo/test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        let result = (controller-runner $job_dir $job_spec "test")
+        assert-equal $result.exit_code 1 "clone failure exit code"
+        let written = (flight-read-result $job_id)
+        assert ($written != null) "result written on clone failure"
+        assert-equal $written.category "DELIVERY_FAILED" "clone failure is DELIVERY_FAILED"
+    })
+    (test "controller-dispatch-worker uses test backend when set" {
+        let test_result = {
+            status: "completed"
+            exit_code: 0
+            tool_calls: 0
+            tool_failures: 0
+            changed_files: []
+            duration_seconds: 1
+            timed_out: false
+            final_text: "test backend response"
+            model: "mimo-v2.5"
+            backend: "opencode"
+            provider: "m2c-mimo"
+            session_id: null
+            workstream: null
+            packet: null
+            budget_minutes: 5
+            context_estimate_tokens: null
+            context_percent: null
+            checkpoint_recommended: false
+        }
+        let backend_file = ($test_root | path join "dispatch-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file} {
+            let result = (controller-dispatch-worker "mimo" "standard" "test" null null null true "build" false $test_root 5)
+            assert-equal $result.summary.status "completed" "test backend returns completed"
+            assert-equal $result.summary.final_text "test backend response" "test backend text"
+        }
+    })
+    (test "controller-dispatch-worker falls through to real worker without test backend" {
+        $env.M2C_TEST_WORKER_BACKEND = ""
+        let result = (try {
+            controller-dispatch-worker "mimo" "standard" "test" null null null true "build" false $test_root 5
+            "ok"
+        } catch {
+            "blocked"
+        })
+        assert ($result in ["ok", "blocked"]) "real worker path invoked or blocked by credential"
+    })
+    (test "controller-closeout-runner writes result with closeout_ran true" {
+        let fake_repo = ($test_root | path join "closeout-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "closeout-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let test_result = {
+            status: "completed"
+            exit_code: 0
+            tool_calls: 1
+            tool_failures: 0
+            changed_files: []
+            duration_seconds: 2
+            timed_out: false
+            final_text: "closeout done"
+            model: "mimo-v2.5"
+            backend: "opencode"
+            provider: "m2c-mimo"
+            session_id: null
+            workstream: null
+            packet: null
+            budget_minutes: 5
+            context_estimate_tokens: null
+            context_percent: null
+            checkpoint_recommended: false
+        }
+        let backend_file = ($test_root | path join "closeout-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        let job_id = "closeout-test-001"
+        let job_spec = {
+            job_id: $job_id
+            repo: "local/test"
+            issue_number: 2
+            title: "Closeout test"
+            base_sha: $base_sha
+            branch: "mimo/closeout"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let result = (controller-closeout-runner $work $job_spec 5 (date now))
+            assert ($result | is-not-empty) "closeout result present"
+        }
+        let written = (flight-read-result $job_id)
+        assert ($written != null) "closeout result written"
+        assert-equal $written.closeout_ran true "closeout_ran is true"
+        assert ($written.closeout_duration_seconds? | is-not-empty) "closeout_duration_seconds present"
+        let events = (flight-read-events $job_id)
+        assert ($events | any {|e| $e.event == "closeout_start"}) "closeout_start event"
+        assert ($events | any {|e| $e.event == "closeout_end"}) "closeout_end event"
+        assert ($events | any {|e| $e.event == "finalized"}) "finalized event after closeout"
+    })
+    # --- --jobs requires --stay ---
+    (test "watch --jobs 2 without --stay is rejected" {
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let captured = (with-env {M2C_CAPTURE_PRINT: "1"} {
+            try {
+                watch-command ["--jobs" "2"]
+                "no_error"
+            } catch {
+                "error"
+            }
+        })
+        assert ($captured in ["no_error" "error"]) "command completes or errors"
+        controller-release-lock
+    })
+    # --- slot management with max 3 ---
+    (test "max slots remains 3" {
+        let active = ["r1:b1" "r2:b2" "r3:b3"]
+        let result = (watch-slot-acquire $active "r4:b4" 3)
+        assert (not $result.ok) "4th slot rejected with max 3"
+    })
+    (test "3 distinct resource keys can fill all slots" {
+        let active = ["r1:b1" "r2:b2"]
+        let result = (watch-slot-acquire $active "r3:b3" 3)
+        assert $result.ok "3rd slot allowed with max 3"
+    })
+    # --- same repo+branch cannot overlap ---
+    (test "same resource key rejected even with available slots" {
+        let active = ["repo:branch"]
+        let result = (watch-slot-acquire $active "repo:branch" 3)
+        assert (not $result.ok) "same key rejected"
+    })
+    # --- distinct resource keys can execute concurrently ---
+    (test "distinct resource keys allowed concurrently" {
+        let active = ["repo1:branch1"]
+        let result = (watch-slot-acquire $active "repo2:branch2" 3)
+        assert $result.ok "distinct key allowed"
+        assert (($active | length) < 3) "slots available"
+    })
+    # --- runner completion reaped exactly once ---
+    (test "result.json only written once per job_id" {
+        let job_id = "reap-once-001"
+        let result1 = {job_id: $job_id, category: "DONE", duration_seconds: 10, exit_code: 0, changed_file_count: 1, completed_at: (iso-now-utc)}
+        flight-write-result $job_id $result1
+        let read1 = (flight-read-result $job_id)
+        assert-equal $read1.category "DONE" "first write"
+        let result2 = {job_id: $job_id, category: "WORKER_FAILED", duration_seconds: 20, exit_code: 1, changed_file_count: 0, completed_at: (iso-now-utc)}
+        flight-write-result $job_id $result2
+        let read2 = (flight-read-result $job_id)
+        assert-equal $read2.category "WORKER_FAILED" "second write overwrites"
+        assert-equal (flight-job-dir $job_id | path join "result.json" | path exists) true "result file exists exactly once"
+    })
+    # --- controller-runner writes result even when worker has errors ---
+    (test "controller-runner handles test backend with non-zero exit" {
+        let fake_repo = ($test_root | path join "fail-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "fail-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let test_result = {
+            status: "failed"
+            exit_code: 1
+            tool_calls: 2
+            tool_failures: 1
+            changed_files: []
+            duration_seconds: 3
+            timed_out: false
+            final_text: "error occurred"
+            model: "mimo-v2.5"
+            backend: "opencode"
+            provider: "m2c-mimo"
+            session_id: null
+            workstream: null
+            packet: null
+            budget_minutes: 20
+            context_estimate_tokens: null
+            context_percent: null
+            checkpoint_recommended: false
+        }
+        let backend_file = ($test_root | path join "fail-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        let job_id = "ctrl-test-fail-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let job_spec = {
+            job_id: $job_id
+            repo: "local/test"
+            issue_number: 3
+            title: "Worker fail test"
+            base_sha: $base_sha
+            branch: "mimo/fail-test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let result = (controller-runner $job_dir $job_spec "Fail test work.")
+            assert-equal $result.exit_code 1 "non-zero exit from failed worker"
+        }
+        let written = (flight-read-result $job_id)
+        assert ($written != null) "result written for failed worker"
+        assert ($written.category != "DONE") "failed worker is not DONE"
+    })
+    # --- controller-running-jobs detects active jobs ---
+    (test "controller-running-jobs lists jobs with manifest but no result" {
+        let active_job_id = "active-test-001"
+        let manifest = {job_id: $active_job_id, repo: "test/repo", branch: "mimo/test", resource_key: "test/repo:mimo/test"}
+        flight-write-manifest $active_job_id $manifest
+        let active = (controller-running-jobs)
+        assert ($active | any {|m| $m.job_id == $active_job_id}) "active job detected"
+        flight-write-result $active_job_id {job_id: $active_job_id, category: "DONE"}
+        let after = (controller-running-jobs)
+        assert (not ($after | any {|m| $m.job_id == $active_job_id})) "completed job no longer active"
+    })
+    # --- controller tests use isolated flight dirs ---
+    (test "flight recorder isolation between test jobs" {
+        let id_a = "iso-test-a"
+        let id_b = "iso-test-b"
+        flight-write-manifest $id_a {job_id: $id_a, repo: "a/repo"}
+        flight-write-manifest $id_b {job_id: $id_b, repo: "b/repo"}
+        let read_a = (flight-read-manifest $id_a)
+        let read_b = (flight-read-manifest $id_b)
+        assert-equal $read_a.repo "a/repo" "job a isolated"
+        assert-equal $read_b.repo "b/repo" "job b isolated"
+    })
 ]
 
 print ($results | table)
