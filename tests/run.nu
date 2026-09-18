@@ -90,7 +90,17 @@ let results = [
     (test "machine execution agent is explicit and packet intent is preserved" {
         assert-equal (worker-agent "Edit src/a.nu and run its tests") "build" "normal execution uses build"
         assert-equal (worker-agent "Plan only; do not edit files") "plan" "plan-only uses plan"
-        assert-equal (worker-agent "Review only, read-only, do not modify files") "explore" "review-only uses explore"
+        assert-equal (worker-agent "Review only, read-only, do not modify files") "build" "review-only uses build"
+        assert-equal (worker-agent "Implement the VM instruction set. Do not modify the immutable core.") "build" "Seedware constraint does not change agent"
+        assert-equal (worker-agent "Install the dependencies. Without modifying the lockfile, run the build.") "build" "incidental constraint mid-packet does not change agent"
+        assert-equal (worker-agent "Plan only; do not edit files") "plan" "plan prefix anchored"
+        assert-equal (worker-agent "nothing about plans here, planning only") "build" "plan keyword not at start is ignored"
+        let never_explore = (["build" "plan"] | all {|a| $a != "explore"})
+        assert $never_explore "explore is never a valid primary agent"
+        let review_cases = ["Review only, read-only, do not modify files" "Read-only audit, do not modify source" "Review without modifying any files"]
+        for rc in $review_cases {
+            assert-equal (worker-agent $rc) "build" $"review-style task ($rc) resolves to build"
+        }
         let normal = (worker-command "mimo-v2.5" "task" null $project_root)
         let plan = (worker-command "mimo-v2.5" "task" null $project_root "plan")
         let forked = (worker-command "mimo-v2.5" "task" "ses-old" $project_root "build" true)
@@ -106,7 +116,7 @@ let results = [
         let cases = [
             {task: "Edit the file and run its tests", expected: "build"}
             {task: "Plan only; do not edit files", expected: "plan"}
-            {task: "Review only, read-only, do not modify files", expected: "explore"}
+            {task: "Review only, read-only, do not modify files", expected: "build"}
         ]
         for case in $cases {
             let envelope = (result-envelope (worker-summary [] "mimo-v2.5" null null 0 0 false) (worker-agent $case.task))

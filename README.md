@@ -47,7 +47,7 @@ Every machine run explicitly selects `m2c-mimo/mimo-v2.5` or `m2c-mimo/mimo-v2.5
 
 Interactive machine runs also show a small live worker console on stderr. It refreshes on a three-second heartbeat from locally cached OpenCode events and process state: selected model, coarse activity, elapsed/watchdog time, tool counts, failures, context estimate, changed-file count, and quiet/final state. `--quiet` suppresses the console. stdout remains a clean JSON envelope for `m2c ... --json | jq .`; the console makes no provider or model calls and consumes no additional context tokens.
 
-Machine workers explicitly select OpenCode's `build` agent, so ordinary `run` packets are execution-capable and do not inherit the user's interactive plan mode. Packets that explicitly say plan-only use `plan`; explicit review/read-only packets use `explore`. If a workstream changes agent mode, m2c forks the prior session before continuing so useful context is retained without carrying an accidental mode across packets.
+Machine workers explicitly select OpenCode's `build` agent, so ordinary `run` packets are execution-capable and do not inherit the user's interactive plan mode. Packets that start with explicit plan-only or planning-only intent use `plan`; everything else uses `build`. If a workstream changes agent mode, m2c forks the prior session before continuing so useful context is retained without carrying an accidental mode across packets.
 
 Packet files are supported with `m2c packet FILE`, `m2c standard packet FILE`, or `m2c pro packet FILE`. Front matter can provide `workstream`, `packet`, and `directory`; explicit flags win, then front matter, then filename inference. Run telemetry is privacy-safe and documented in [`docs/TELEMETRY.md`](docs/TELEMETRY.md).
 
