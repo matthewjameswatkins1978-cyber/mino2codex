@@ -354,7 +354,7 @@ let results = [
         let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "pro"}
         let result = (watch-validate-packet $fm)
         assert $result.ok "valid job accepted"
-        assert-equal $result.model "pro" "model parsed"
+        assert-equal $result.profile "pro" "profile parsed"
         assert-equal $result.branch "feature/test" "branch extracted"
     })
     (test "watch validate m2c_job must be exactly 1" {
@@ -380,21 +380,21 @@ let results = [
     (test "watch build result comment for FAILED includes reasons" {
         let summary = {status: "failed", exit_code: 1}
         let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: true}
-        let comment = (watch-build-result-comment $summary $delivery "pro" "FAILED")
-        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED status"
+        let comment = (watch-build-result-comment $summary $delivery "pro" "DELIVERY_FAILED")
+        assert ($comment | str contains "M2C RESULT: DELIVERY_FAILED") "DELIVERY_FAILED status"
         assert ($comment | str contains "model: pro") "model line"
         assert ($comment | str contains "worktree: DIRTY") "worktree dirty"
         assert ($comment | str contains "remote: MISMATCH") "remote mismatch"
         assert ($comment | str contains "worktree is dirty") "dirty reason"
         assert ($comment | str contains "remote branch") "missing remote reason"
-        assert ($comment | str contains "worker status: failed") "worker failure reason"
+        assert ($comment | str contains "worker exit code: 1") "worker failure reason"
     })
     (test "watch build result comment for timeout status" {
         let summary = {status: "timed_out", exit_code: 124}
         let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
-        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
-        assert ($comment | str contains "M2C RESULT: FAILED") "timeout becomes FAILED"
-        assert ($comment | str contains "worker status: timed_out") "timeout reason"
+        let comment = (watch-build-result-comment $summary $delivery "standard" "TIMED_OUT")
+        assert ($comment | str contains "M2C RESULT: TIMED_OUT") "timeout becomes TIMED_OUT"
+        assert ($comment | str contains "watchdog terminated the worker") "timeout reason"
     })
     # --- watch exit code ---
     (test "watch exit for completed is 0" {
@@ -600,23 +600,23 @@ let results = [
     (test "watch build result comment FAILED when timed out" {
         let summary = {status: "timed_out", exit_code: 124}
         let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
-        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
-        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when timed out"
-        assert ($comment | str contains "worker status: timed_out") "timeout reason"
+        let comment = (watch-build-result-comment $summary $delivery "standard" "TIMED_OUT")
+        assert ($comment | str contains "M2C RESULT: TIMED_OUT") "TIMED_OUT when timed out"
+        assert ($comment | str contains "watchdog terminated the worker") "timeout reason"
     })
     (test "watch build result comment FAILED when cancelled" {
         let summary = {status: "cancelled", exit_code: 130}
         let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
-        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
-        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when cancelled"
-        assert ($comment | str contains "worker status: cancelled") "cancel reason"
+        let comment = (watch-build-result-comment $summary $delivery "standard" "TIMED_OUT")
+        assert ($comment | str contains "M2C RESULT: TIMED_OUT") "TIMED_OUT when cancelled"
+        assert ($comment | str contains "worker was cancelled") "cancel reason"
     })
     (test "watch build result comment FAILED when worker failed even with clean delivery" {
         let summary = {status: "failed", exit_code: 1}
         let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
-        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
-        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED when worker failed"
-        assert ($comment | str contains "worker status: failed") "worker failure reason"
+        let comment = (watch-build-result-comment $summary $delivery "standard" "WORKER_FAILED")
+        assert ($comment | str contains "M2C RESULT: WORKER_FAILED") "WORKER_FAILED when worker failed"
+        assert ($comment | str contains "worker exit code: 1") "worker failure reason"
     })
     # --- fix: repo field uses canonical identity from admission ---
     (test "discovery row has no .repo field (proves bug on stale main)" {
@@ -631,9 +631,12 @@ let results = [
         assert-equal (watch-issue-repo $bare) "bare-name" "falls back to bare name"
     })
     (test "admission record provides canonical repo and number for claim" {
-        let admission = {ok: true, base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard", packet: "do work", owner: "alice", repo: "alice/my-repo", number: 7, title: "[M2C QUEUED] test", url: "https://github.com/alice/my-repo/issues/7"}
+        let admission = {ok: true, base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", worker: "mimo", profile: "standard", mode: "build", packet: "do work", owner: "alice", repo: "alice/my-repo", number: 7, title: "[M2C QUEUED] test", url: "https://github.com/alice/my-repo/issues/7"}
         assert-equal $admission.repo "alice/my-repo" "admission.repo is canonical"
         assert-equal $admission.number 7 "admission.number present"
+        assert-equal $admission.worker "mimo" "admission.worker is mimo"
+        assert-equal $admission.profile "standard" "admission.profile is standard"
+        assert-equal $admission.mode "build" "admission.mode is build"
     })
     (test "admitted claim uses canonical repo identity not discovery row" {
         let discovery = {repository: {nameWithOwner: "alice/my-repo", name: "my-repo"}, title: "[M2C QUEUED] test", number: 7, url: "https://github.com/alice/my-repo/issues/7"}
@@ -642,26 +645,26 @@ let results = [
         assert-equal $admission.number $discovery.number "admission number matches discovery"
     })
     (test "DONE title and comment use canonical admission repo identity" {
-        let admission = {repo: "alice/my-repo", number: 7, model: "standard"}
+        let admission = {repo: "alice/my-repo", number: 7, profile: "standard"}
         let final_status = "DONE"
         let final_title = $"[M2C ($final_status)]"
         assert ($final_title == "[M2C DONE]") "DONE title format"
         let summary = {status: "completed", exit_code: 0}
         let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: true, remote_exists: true, remote_sha: "abc123", sha_match: true, branch_match: true}
-        let comment = (watch-build-result-comment $summary $delivery $admission.model $final_status)
+        let comment = (watch-build-result-comment $summary $delivery $admission.profile $final_status)
         assert ($comment | str contains "M2C RESULT: DONE") "DONE comment uses canonical status"
         assert-equal $admission.repo "alice/my-repo" "repo identity preserved for DONE"
     })
     (test "FAILED title and comment use canonical admission repo identity" {
-        let admission = {repo: "alice/my-repo", number: 7, model: "pro"}
-        let final_status = "FAILED"
+        let admission = {repo: "alice/my-repo", number: 7, profile: "pro"}
+        let final_status = "DELIVERY_FAILED"
         let final_title = $"[M2C ($final_status)]"
-        assert ($final_title == "[M2C FAILED]") "FAILED title format"
+        assert ($final_title == "[M2C DELIVERY_FAILED]") "DELIVERY_FAILED title format"
         let summary = {status: "failed", exit_code: 1}
         let delivery = {local_branch: "mimo/test", local_sha: "abc123", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: false}
-        let comment = (watch-build-result-comment $summary $delivery $admission.model $final_status)
-        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED comment uses canonical status"
-        assert-equal $admission.repo "alice/my-repo" "repo identity preserved for FAILED"
+        let comment = (watch-build-result-comment $summary $delivery $admission.profile $final_status)
+        assert ($comment | str contains "M2C RESULT: DELIVERY_FAILED") "DELIVERY_FAILED comment uses canonical status"
+        assert-equal $admission.repo "alice/my-repo" "repo identity preserved for DELIVERY_FAILED"
     })
     (test "rejection path derives repo from discovery row without .repo field" {
         let discovery = {repository: {nameWithOwner: "alice/my-repo", name: "my-repo"}, title: "[M2C QUEUED] test", number: 7, url: "https://github.com/alice/my-repo/issues/7"}
@@ -791,12 +794,12 @@ let results = [
         assert ($comment | str contains "does not match requested branch") "explains mismatch"
     })
     # --- regression: failure/fallback delivery shape includes branch_match ---
-    (test "fallback delivery record from clone failure produces FAILED without column error" {
+    (test "fallback delivery record from clone failure produces WORKER_FAILED without column error" {
         let delivery = {local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: false}
         let summary = {status: "failed", exit_code: 1, final_text: "worker error"}
-        let comment = (watch-build-result-comment $summary $delivery "standard" "FAILED")
-        assert ($comment | str contains "M2C RESULT: FAILED") "FAILED status produced"
-        assert ($comment | str contains "worker status: failed") "worker failure reported"
+        let comment = (watch-build-result-comment $summary $delivery "standard" "WORKER_FAILED")
+        assert ($comment | str contains "M2C RESULT: WORKER_FAILED") "WORKER_FAILED status produced"
+        assert ($comment | str contains "worker exit code: 1") "worker failure reported"
         assert ($comment | str contains "branch_match: MISMATCH") "branch_match shown as MISMATCH"
         assert ($comment | str contains "worktree: DIRTY") "worktree dirty"
         assert ($comment | str contains "remote: MISMATCH") "remote mismatch"
@@ -986,6 +989,149 @@ let results = [
         assert (($tag | describe) == "int") "tag is int on this platform"
         assert ($tag > 0) "positive tag"
         assert (($tag | into string | str length) > 0) "tag has string representation"
+    })
+    # --- flight recorder ---
+    (test "flight recorder writes and reads manifest" {
+        let job_id = "test-flight-001"
+        let manifest = {job_id: $job_id, repo: "alice/my-repo", issue_number: 7, title: "Test job", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, resource_key: "alice/my-repo:feature/test", claimed_at: (iso-now-utc), m2c_version: "0.2.0", m2c_source_hash: "abc1234"}
+        flight-write-manifest $job_id $manifest
+        let read_back = (flight-read-manifest $job_id)
+        assert-equal $read_back.job_id $job_id "job_id preserved"
+        assert-equal $read_back.repo "alice/my-repo" "repo preserved"
+        assert-equal $read_back.worker "mimo" "worker preserved"
+        assert-equal $read_back.profile "standard" "profile preserved"
+        assert-equal $read_back.mode "build" "mode preserved"
+    })
+    (test "flight recorder appends events" {
+        let job_id = "test-flight-002"
+        flight-append-event $job_id {event: "claimed", repo: "test/repo"}
+        flight-append-event $job_id {event: "runner_start"}
+        flight-append-event $job_id {event: "runner_end", status: "completed"}
+        let events = (flight-read-events $job_id)
+        assert-equal ($events | length) 3 "three events"
+        assert-equal $events.0.event "claimed" "first event"
+        assert-equal $events.1.event "runner_start" "second event"
+        assert-equal $events.2.event "runner_end" "third event"
+        assert ($events.0.timestamp? | is-not-empty) "timestamp present"
+    })
+    (test "flight recorder writes and reads result" {
+        let job_id = "test-flight-003"
+        let result = {job_id: $job_id, repo: "test/repo", category: "DONE", duration_seconds: 120, exit_code: 0, changed_file_count: 3}
+        flight-write-result $job_id $result
+        let read_back = (flight-read-result $job_id)
+        assert-equal $read_back.category "DONE" "category preserved"
+        assert-equal $read_back.duration_seconds 120 "duration preserved"
+        assert-equal $read_back.changed_file_count 3 "file count preserved"
+    })
+    (test "flight recorder lists jobs" {
+        let jobs = (flight-list-jobs)
+        assert ($jobs | any {|j| $j == "test-flight-001"}) "first job listed"
+        assert ($jobs | any {|j| $j == "test-flight-002"}) "second job listed"
+    })
+    # --- redaction ---
+    (test "redact secrets removes tp- keys" {
+        let text = "Using key tp-TEST-DO-NOT-USE-1234567890 for auth"
+        let redacted = (redact-secrets $text)
+        assert (not ($redacted | str contains "tp-TEST")) "key removed"
+        assert ($redacted | str contains "[REDACTED_KEY]") "redaction marker"
+    })
+    (test "redact secrets removes api_key assignments" {
+        let text = "api_key=supersecretvalue123 and token: othertoken456"
+        let redacted = (redact-secrets $text)
+        assert (not ($redacted | str contains "supersecretvalue")) "api_key value removed"
+        assert (not ($redacted | str contains "othertoken456")) "token value removed"
+    })
+    (test "redact secrets preserves normal text" {
+        let text = "The quick brown fox jumps over the lazy dog"
+        let redacted = (redact-secrets $text)
+        assert-equal $redacted $text "normal text unchanged"
+    })
+    (test "flight recorder events do not contain credential values" {
+        let job_id = "test-flight-redact"
+        flight-append-event $job_id {event: "test", note: "key tp-TEST-SECRET-1234567890 was used"}
+        let events = (flight-read-events $job_id)
+        let json = ($events | to json)
+        assert (not ($json | str contains "tp-TEST-SECRET")) "no secret in events"
+    })
+    # --- failure signatures ---
+    (test "failure signature watchdog_timeout" {
+        let summary = {status: "timed_out", exit_code: 124}
+        let delivery = {worktree_clean: true, remote_exists: true, sha_match: true, branch_match: true}
+        assert-equal (normalize-failure-signature $summary $delivery "TIMED_OUT") "watchdog_timeout" "timeout signature"
+    })
+    (test "failure signature process_sigkill" {
+        let summary = {status: "failed", exit_code: -9}
+        let delivery = {worktree_clean: true, remote_exists: true, sha_match: true, branch_match: true}
+        assert-equal (normalize-failure-signature $summary $delivery "WORKER_FAILED") "process_sigkill" "sigkill signature"
+    })
+    (test "failure signature worker_exit_nonzero" {
+        let summary = {status: "failed", exit_code: 1}
+        let delivery = {worktree_clean: true, remote_exists: true, sha_match: true, branch_match: true}
+        assert-equal (normalize-failure-signature $summary $delivery "WORKER_FAILED") "worker_exit_nonzero" "nonzero exit signature"
+    })
+    (test "failure signature worker_zero_exit_no_changes" {
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {worktree_clean: true, remote_exists: false, sha_match: false, branch_match: true, changed_file_count: 0}
+        assert-equal (normalize-failure-signature $summary $delivery "NO_CHANGES") "worker_zero_exit_no_changes" "no changes signature"
+    })
+    (test "failure signature branch_mismatch" {
+        let summary = {status: "failed", exit_code: 1}
+        let delivery = {worktree_clean: true, remote_exists: true, sha_match: true, branch_match: false}
+        assert-equal (normalize-failure-signature $summary $delivery "DELIVERY_FAILED") "branch_mismatch" "branch mismatch signature"
+    })
+    (test "failure signature remote_missing" {
+        let summary = {status: "failed", exit_code: 1}
+        let delivery = {worktree_clean: true, remote_exists: false, sha_match: false, branch_match: true}
+        assert-equal (normalize-failure-signature $summary $delivery "DELIVERY_FAILED") "remote_missing" "remote missing signature"
+    })
+    (test "failure signature dirty_worktree" {
+        let summary = {status: "failed", exit_code: 1}
+        let delivery = {worktree_clean: false, remote_exists: true, sha_match: true, branch_match: true}
+        assert-equal (normalize-failure-signature $summary $delivery "DELIVERY_FAILED") "dirty_worktree" "dirty worktree signature"
+    })
+    (test "failure signature DONE returns unknown" {
+        let summary = {status: "completed", exit_code: 0}
+        let delivery = {worktree_clean: true, remote_exists: true, sha_match: true, branch_match: true, changed_file_count: 3}
+        assert-equal (normalize-failure-signature $summary $delivery "DONE") "unknown" "DONE has no failure signature"
+    })
+    # --- controller lock ---
+    (test "controller lock acquires when no lock exists" {
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let result = (controller-acquire-lock)
+        assert $result.ok "lock acquired"
+        controller-write-lock 1
+        assert ($lock_path | path exists) "lock file created"
+        controller-release-lock
+        assert (not ($lock_path | path exists)) "lock file removed"
+    })
+    (test "controller lock rejects stale lock" {
+        let lock_path = (controller-lock-path)
+        {pid: 99999999, slots: 1, started_at: (iso-now-utc), version: "0.0.0"} | to json | save --force $lock_path
+        let result = (controller-acquire-lock)
+        assert $result.ok "stale lock recovered"
+        controller-release-lock
+    })
+    (test "controller lock rejects active lock" {
+        let lock_path = (controller-lock-path)
+        {pid: $nu.pid, slots: 1, started_at: (iso-now-utc), version: "0.2.0"} | to json | save --force $lock_path
+        let result = (controller-acquire-lock)
+        assert (not $result.ok) "active lock rejected"
+        assert ($result.reason | str contains "already active") "reason mentions active"
+        controller-release-lock
+    })
+    (test "controller lock write and read" {
+        controller-write-lock 2
+        let lock_path = (controller-lock-path)
+        let data = (open --raw $lock_path | from json)
+        assert-equal $data.pid $nu.pid "pid in lock"
+        assert-equal $data.slots 2 "slots in lock"
+        assert ($data.started_at? | is-not-empty) "timestamp in lock"
+        controller-release-lock
+    })
+    (test "controller running jobs function exists and callable" {
+        let fn_exists = (try { controller-running-jobs; true } catch { false })
+        assert $fn_exists "controller-running-jobs is callable"
     })
 ]
 

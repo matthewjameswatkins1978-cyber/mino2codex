@@ -29,18 +29,22 @@ If OpenCode is missing, `m2c setup` reports the detected state and the Nu-native
 ```text
 m2c                         interactive Pro worker
 m2c standard                interactive standard worker
-m2c pro                    interactive Pro worker
+m2c pro                     interactive Pro worker
 m2c run "bounded task"      machine worker, default Pro
-m2c standard run "task"    machine standard worker
-m2c pro run --json "task"  machine Pro worker with JSON envelope
+m2c standard run "task"     machine standard worker
+m2c pro run --json "task"   machine Pro worker with JSON envelope
 m2c run --workstream NAME --packet A1 --json "task"
 m2c standard run --quiet --json "task"
 m2c models
 m2c doctor [--live]
 m2c key status|replace|remove
 m2c checkpoint --workstream NAME
-m2c watch                   persistent GitHub job watcher
-m2c watch --once            check/process one eligible GitHub job, then exit
+m2c watch                   watch GitHub (one job, then return)
+m2c watch --stay            persistent watcher, continues after jobs finish
+m2c watch --check           one non-waiting poll, exit if no jobs
+m2c watch --once            backward-compatible alias for --check
+m2c status                  show m2c status and recent jobs
+m2c inspect <job-id>        show flight recorder timeline for a job
 m2c version
 m2c uninstall
 ```
@@ -63,7 +67,9 @@ The current usage estimate is `tokens.input + tokens.cache.read`, based on OpenC
 
 ## GitHub Watch
 
-`m2c watch` polls GitHub for open issues owned by the authenticated user whose title begins with `[M2C QUEUED]`. The current watcher stays running after a job completes; `m2c watch --once` performs one poll, processes one eligible job if present, and returns.
+`m2c watch` polls GitHub for open issues owned by the authenticated user whose title begins with `[M2C QUEUED]`. By default, `m2c watch` processes one eligible job and returns to Nushell. Use `m2c watch --stay` for the persistent watcher that continues polling after jobs finish. Use `m2c watch --check` for one non-waiting poll that exits cleanly if no jobs are found. `m2c watch --once` is preserved as a backward-compatible alias for `--check`.
+
+A single-controller lock prevents multiple watchers from running simultaneously. If a second controller starts, it exits with a message identifying the active controller's PID.
 
 A Watch issue uses frontmatter followed by the bounded worker packet:
 
@@ -78,6 +84,32 @@ budget_minutes: 45
 ```
 
 `model` must be `standard` or `pro`. `budget_minutes` is optional, defaults to 20, accepts only integer values from 5 through 120 inclusive, and fails closed when present but invalid. Before claiming a job, m2c revalidates the live issue, owner, title/state, base SHA, branch and packet. Completion still requires the requested branch, a clean worktree, a remote branch, and matching local/remote SHA. Worker prose is evidence; these delivery facts are checked mechanically by m2c.
+
+### Result categories
+
+m2c uses deterministic result categories derived from process/Git/GitHub truth:
+
+- **DONE**: worker completed and all delivery gates pass.
+- **BLOCKED**: admission refused before execution.
+- **WORKER_FAILED**: worker process exit indicates execution failure.
+- **TIMED_OUT**: watchdog ended the worker.
+- **NO_CHANGES**: worker completed but produced no delivered change.
+- **DELIVERY_FAILED**: work exists but branch/remote/SHA/worktree delivery gates fail.
+- **INTERNAL_ERROR**: m2c/controller/runner itself failed unexpectedly.
+
+Issue titles preserve the original descriptive title across all transitions: `[M2C DONE] Resolve R1-A2 preparation identity binding`.
+
+### Flight recorder
+
+Every watched job produces privacy-safe, append-only local artifacts in `jobs/<job-id>/`:
+
+- `manifest.json`: written at claim time with job metadata
+- `events.jsonl`: append-only lifecycle events
+- `result.json`: written after finalization
+
+Use `m2c inspect <job-id>` to view a compact timeline. Use `m2c status` to see recent jobs and aggregate statistics.
+
+Credentials, API keys, environment secrets, and raw provider payloads are never recorded in flight logs.
 
 ## Configuration and security
 
