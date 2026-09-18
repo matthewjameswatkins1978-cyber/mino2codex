@@ -2961,17 +2961,20 @@ let results = [
         let esc = (char --integer 27)
         let frame = ["header" "" "footer"]
         let result = (live-build-panel-bytes $frame 0)
-        let has_cu_a = ($result.bytes | str contains $"($esc)[3A")
-        assert (not $has_cu_a) "no cursor-up sequence in first render"
+        let has_cu_a = ($result.bytes | str contains $"($esc)[1A")
+        let has_cu_2a = ($result.bytes | str contains $"($esc)[2A")
+        let has_cu_3a = ($result.bytes | str contains $"($esc)[3A")
+        assert (not $has_cu_a) "no cursor-up 1 in first render"
+        assert (not $has_cu_2a) "no cursor-up 2 in first render"
+        assert (not $has_cu_3a) "no cursor-up 3 in first render"
         assert-equal $result.owned 3 "owned matches frame length"
     })
-    (test "live-build-panel-bytes second render has cursor-up without stray newline" {
+    (test "live-build-panel-bytes second render uses cursor-up previous_lines minus 1" {
         let esc = (char --integer 27)
         let frame = ["header" "" "footer"]
         let first = (live-build-panel-bytes $frame 0)
-        let second = (live-build-panel-bytes $frame 3)
-        assert ($second.bytes | str contains $"($esc)[3A") "cursor-up 3 present"
-        assert (not ($second.bytes | str contains $"($esc)[3A\n")) "no stray newline after cursor-up"
+        let second = (live-build-panel-bytes $frame $first.owned)
+        assert ($second.bytes | str contains $"($esc)[2A") "cursor-up (owned-1)=2 present"
         assert-equal $second.owned 3 "owned stable"
     })
     (test "live-build-panel-bytes N refreshes keep same owned count" {
@@ -2983,27 +2986,39 @@ let results = [
         }
         assert-equal $owned 5 "owned remains 5 after 6 refreshes"
     })
-    (test "live-build-panel-bytes content lines have exactly one newline each" {
+    (test "live-build-panel-bytes output contains no line feed bytes" {
+        let frame = ["line1" "line2" "line3"]
+        let result = (live-build-panel-bytes $frame 0)
+        let lf = (char --integer 10)
+        assert (not ($result.bytes | str contains $lf)) "no LF byte that causes scroll"
+    })
+    (test "live-build-panel-bytes redraw contains no line feed bytes" {
+        let frame = ["line1" "line2" "line3"]
+        let first = (live-build-panel-bytes $frame 0)
+        let second = (live-build-panel-bytes $frame $first.owned)
+        let lf = (char --integer 10)
+        assert (not ($second.bytes | str contains $lf)) "no LF in redraw"
+    })
+    (test "live-build-panel-bytes uses cursor-down sequences for inter-line movement" {
         let esc = (char --integer 27)
         let frame = ["line1" "line2" "line3"]
         let result = (live-build-panel-bytes $frame 0)
-        let newlines = ($result.bytes | str replace --all --regex '[^\n]' '' | str length)
-        assert-equal $newlines 3 "three newlines for three lines"
+        assert ($result.bytes | str contains $"($esc)[1B") "cursor-down present for inter-line movement"
     })
-    (test "live-build-panel-bytes cursor-up count matches previous_lines" {
+    (test "live-build-panel-bytes cursor-up count is previous_lines minus 1" {
         let esc = (char --integer 27)
         let frame = ["a" "b" "c" "d"]
         let result = (live-build-panel-bytes $frame 4)
-        assert ($result.bytes | str contains $"($esc)[4A") "cursor-up 4 for 4 previous lines"
+        assert ($result.bytes | str contains $"($esc)[3A") "cursor-up (4-1)=3 for 4 previous lines"
     })
     (test "live-build-panel-bytes shrinking frame clears extra lines" {
         let esc = (char --integer 27)
         let big_frame = ["a" "b" "c" "d" "e"]
         let small_frame = ["a" "b"]
         let first = (live-build-panel-bytes $big_frame 0)
-        let second = (live-build-panel-bytes $small_frame 5)
+        let second = (live-build-panel-bytes $small_frame $first.owned)
         assert ($second.bytes | str contains $"($esc)[2K") "clear-line present"
-        assert ($second.bytes | str contains $"($esc)[3A") "cursor-up 3 for extra lines"
+        assert ($second.bytes | str contains $"($esc)[4A") "cursor-up (5-1)=4 for extra line handling"
         assert-equal $second.owned 2 "owned shrinks to 2"
     })
     (test "live-build-clear-bytes returns empty for zero previous_lines" {
@@ -3011,41 +3026,35 @@ let results = [
         assert-equal $result.bytes "" "empty bytes"
         assert-equal $result.owned 0 "owned is 0"
     })
-    (test "live-build-clear-bytes cursor-up matches previous_lines" {
+    (test "live-build-clear-bytes uses cursor-up previous_lines minus 1" {
         let esc = (char --integer 27)
         let result = (live-build-clear-bytes 5)
-        assert ($result.bytes | str contains $"($esc)[5A") "cursor-up 5"
+        assert ($result.bytes | str contains $"($esc)[4A") "cursor-up (5-1)=4"
         assert ($result.bytes | str contains $"($esc)[?25h") "cursor visible"
         assert-equal $result.owned 0 "owned is 0 after clear"
     })
-    (test "live-build-clear-bytes clears each line with newline" {
-        let esc = (char --integer 27)
+    (test "live-build-clear-bytes output contains no line feed bytes" {
         let result = (live-build-clear-bytes 3)
-        let newlines = ($result.bytes | str replace --all --regex '[^\n]' '' | str length)
-        assert-equal $newlines 3 "three newlines for three cleared lines"
+        let lf = (char --integer 10)
+        assert (not ($result.bytes | str contains $lf)) "no LF byte in clear output"
     })
-    (test "two identical renders produce correct cursor-up overhead" {
-        let esc = (char --integer 27)
-        let cu3 = $"($esc)[3A"
-        let expected_overhead = ($cu3 | str length)
+    (test "two identical renders produce no extra line feed overhead" {
         let frame = ["header" "" "footer"]
         let first = (live-build-panel-bytes $frame 0)
-        let second = (live-build-panel-bytes $frame 3)
-        let first_len = ($first.bytes | str length)
-        let second_len = ($second.bytes | str length)
-        assert ($second_len > $first_len) "second render includes cursor-up"
-        let cursor_up_overhead = ($second_len - $first_len)
-        assert-equal $cursor_up_overhead $expected_overhead "overhead matches ESC[3A length"
+        let second = (live-build-panel-bytes $frame $first.owned)
+        let lf = (char --integer 10)
+        assert (not ($first.bytes | str contains $lf)) "first render: no LF"
+        assert (not ($second.bytes | str contains $lf)) "second render: no LF"
+        assert-equal $first.owned $second.owned "owned count identical"
     })
     (test "zero-active to one-active transition does not creep downward" {
         let zero_frame = (live-panel-frame {active: [], queued: 0, free: 3, max_slots: 3, now: (date now)})
         let zero_result = (live-build-panel-bytes $zero_frame 0)
         let one_frame = (live-panel-frame {active: [{title: "J", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 10, closeout_at: (date now), deadline_at: (date now)}], queued: 0, free: 2, max_slots: 3, now: (date now)})
-        let one_result = (live-build-panel-bytes $one_frame ($zero_result.owned))
+        let one_result = (live-build-panel-bytes $one_frame $zero_result.owned)
         assert ($one_result.owned > $zero_result.owned) "panel grows"
-        let zero_newlines = ($zero_result.bytes | str replace --all --regex '[^\n]' '' | str length)
-        let one_newlines = ($one_result.bytes | str replace --all --regex '[^\n]' '' | str length)
-        assert-equal ($one_newlines - $zero_newlines) 4 "grew by exactly 4 lines"
+        let lf = (char --integer 10)
+        assert (not ($one_result.bytes | str contains $lf)) "no LF in transition bytes"
     })
     (test "redirected mode output has no ANSI escape bytes" {
         let zero_state = (live-panel-state [] 3 0)

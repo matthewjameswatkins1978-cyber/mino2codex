@@ -559,16 +559,27 @@ def console-enabled [quiet: bool] {
 
 def render-console [frame: list<string> previous_lines: int = 0] {
     let esc = (char --integer 27)
+    let new_count = ($frame | length)
     mut buf = ""
-    if $previous_lines > 0 { $buf = $"($esc)[($previous_lines)A" }
-    for line in $frame { $buf = $"($buf)($esc)[2K($line)\n" }
+    if $previous_lines > 1 { $buf = $"($esc)[($previous_lines - 1)A" }
+    let last_idx = ($new_count - 1)
+    mut i = 0
+    for line in $frame {
+        if $i < $last_idx {
+            $buf = $"($buf)\r($esc)[2K($line)($esc)[1B"
+        } else {
+            $buf = $"($buf)\r($esc)[2K($line)"
+        }
+        $i = $i + 1
+    }
     print -n --stderr $buf
-    $frame | length
+    $new_count
 }
 
 def finish-console [enabled: bool previous_lines: int] {
     if $enabled {
         let esc = (char --integer 27)
+        if $previous_lines > 0 { print -n --stderr $"($esc)[1B" }
         print -n --stderr $"($esc)[?25h"
     }
 }
@@ -640,12 +651,21 @@ def live-build-panel-bytes [frame: list<string> previous_lines: int] {
     let esc = (char --integer 27)
     let new_count = ($frame | length)
     mut buf = ""
-    if $previous_lines > 0 { $buf = $"($esc)[($previous_lines)A" }
-    for line in $frame { $buf = $"($buf)($esc)[2K($line)\n" }
+    if $previous_lines > 1 { $buf = $"($esc)[($previous_lines - 1)A" }
+    let last_idx = ($new_count - 1)
+    mut i = 0
+    for line in $frame {
+        if $i < $last_idx {
+            $buf = $"($buf)\r($esc)[2K($line)($esc)[1B"
+        } else {
+            $buf = $"($buf)\r($esc)[2K($line)"
+        }
+        $i = $i + 1
+    }
     if $previous_lines > $new_count {
         let extra = ($previous_lines - $new_count)
-        for _ in 0..<$extra { $buf = $"($buf)($esc)[2K\n" }
-        $buf = $"($buf)($esc)[($extra)A"
+        for _ in 0..<$extra { $buf = $"($buf)($esc)[1B\r($esc)[2K" }
+        if $extra > 0 { $buf = $"($buf)($esc)[($extra)A" }
     }
     {bytes: $buf, owned: $new_count}
 }
@@ -661,8 +681,12 @@ def live-build-clear-bytes [previous_lines: int] {
         {bytes: "", owned: 0}
     } else {
         let esc = (char --integer 27)
-        mut buf = $"($esc)[($previous_lines)A"
-        for _ in 0..<$previous_lines { $buf = $"($buf)($esc)[2K\n" }
+        mut buf = ""
+        if $previous_lines > 1 { $buf = $"($esc)[($previous_lines - 1)A" }
+        for i in 0..<$previous_lines {
+            $buf = $"($buf)\r($esc)[2K"
+            if ($i + 1) < $previous_lines { $buf = $"($buf)($esc)[1B" }
+        }
         $buf = $"($buf)($esc)[?25h"
         {bytes: $buf, owned: 0}
     }
@@ -2164,8 +2188,9 @@ def watch-command [args: list<string>] {
                         if ($clear_result.bytes | is-not-empty) { print -n --stderr $clear_result.bytes }
                         $panel_lines = 0
                     }
+                    let esc = (char --integer 27)
                     mut receipt_buf = ""
-                    for receipt in $pending_receipts { $receipt_buf = $"($receipt_buf)($receipt)\n" }
+                    for receipt in $pending_receipts { $receipt_buf = $"($receipt_buf)($receipt)\r($esc)[1B" }
                     print -n --stderr $receipt_buf
                     $pending_receipts = []
                 }
