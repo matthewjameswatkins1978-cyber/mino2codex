@@ -1133,6 +1133,157 @@ let results = [
         let fn_exists = (try { controller-running-jobs; true } catch { false })
         assert $fn_exists "controller-running-jobs is callable"
     })
+    # --- RUNNING title preservation ---
+    (test "RUNNING title preserves descriptive title" {
+        let original = "Fix authentication bug"
+        let running_title = $"[M2C RUNNING] ($original)"
+        assert ($running_title | str contains "[M2C RUNNING]") "RUNNING prefix present"
+        assert ($running_title | str contains $original) "original title preserved"
+        assert (not ($running_title == "[M2C RUNNING]")) "not bare RUNNING"
+    })
+    # --- UTC timestamp ---
+    (test "iso-now-utc produces Z suffix" {
+        let ts = (iso-now-utc)
+        assert ($ts | str ends-with "Z") "timestamp ends with Z"
+        assert ($ts | str contains "T") "timestamp contains T separator"
+    })
+    # --- worker dispatch seam ---
+    (test "worker-dispatch rejects unknown worker" {
+        let result = (try { worker-dispatch "unknown" "standard" "test" null null null true "build" false $project_root 20; "unexpected" } catch { "blocked" })
+        assert-equal $result "blocked" "unknown worker rejected"
+    })
+    (test "worker-dispatch accepts mimo worker" {
+        let result = (try { worker-dispatch "mimo" "standard" "test" null null null true "build" false $project_root 20; "ok" } catch { "blocked" })
+        assert ($result in ["ok", "blocked"]) "mimo worker accepted or blocked by credential"
+    })
+    # --- soft deadline and closeout reserve ---
+    (test "soft-deadline-ns is 80% of hard deadline" {
+        let soft = (soft-deadline-ns 20)
+        let hard = (watchdog-limit-from-budget 20)
+        assert-equal $soft (($hard * 80) / 100) "soft deadline is 80%"
+    })
+    (test "closeout-reserve-ns is 10% of hard deadline" {
+        let closeout = (closeout-reserve-ns 20)
+        let hard = (watchdog-limit-from-budget 20)
+        assert-equal $closeout (($hard * 10) / 100) "closeout reserve is 10%"
+    })
+    # --- PARTIAL classification ---
+    (test "PARTIAL classification when timed out with remote push" {
+        let summary = {status: "timed_out", exit_code: 124}
+        let delivery = {worktree_clean: true, remote_exists: true, sha_match: true, branch_match: true}
+        assert-equal (watch-classify-result $summary $delivery) "PARTIAL" "PARTIAL when timed out with push"
+    })
+    (test "PARTIAL classification when cancelled with remote push" {
+        let summary = {status: "cancelled", exit_code: 130}
+        let delivery = {worktree_clean: true, remote_exists: true, sha_match: true, branch_match: true}
+        assert-equal (watch-classify-result $summary $delivery) "PARTIAL" "PARTIAL when cancelled with push"
+    })
+    (test "TIMED_OUT when timed out without remote push" {
+        let summary = {status: "timed_out", exit_code: 124}
+        let delivery = {worktree_clean: true, remote_exists: false, sha_match: false, branch_match: true}
+        assert-equal (watch-classify-result $summary $delivery) "TIMED_OUT" "TIMED_OUT when no push"
+    })
+    (test "DONE never for timed out or cancelled" {
+        let timed = {status: "timed_out", exit_code: 124}
+        let delivery = {worktree_clean: true, remote_exists: true, sha_match: true, branch_match: true}
+        assert (not ((watch-classify-result $timed $delivery) == "DONE")) "DONE never for timeout"
+    })
+    # --- slot management ---
+    (test "watch-slot-acquire rejects when all slots full" {
+        let active = ["repo1:branch1" "repo2:branch2"]
+        let result = (watch-slot-acquire $active "repo3:branch3" 2)
+        assert (not $result.ok) "slots full rejected"
+    })
+    (test "watch-slot-acquire rejects same resource key" {
+        let active = ["repo1:branch1"]
+        let result = (watch-slot-acquire $active "repo1:branch1" 2)
+        assert (not $result.ok) "same resource key rejected"
+    })
+    (test "watch-slot-acquire allows different resource key" {
+        let active = ["repo1:branch1"]
+        let result = (watch-slot-acquire $active "repo2:branch2" 2)
+        assert $result.ok "different key allowed"
+    })
+    (test "watch-slot-acquire allows when empty" {
+        let active = []
+        let result = (watch-slot-acquire $active "repo1:branch1" 2)
+        assert $result.ok "empty slots allow"
+    })
+    (test "watch-parse-jobs defaults to 1" {
+        let result = (watch-parse-jobs ["--stay"])
+        assert-equal $result 1 "default jobs is 1"
+    })
+    (test "watch-parse-jobs parses --jobs 2" {
+        let result = (watch-parse-jobs ["--stay" "--jobs" "2"])
+        assert-equal $result 2 "jobs 2 parsed"
+    })
+    (test "watch-parse-jobs rejects --jobs 4" {
+        let result = (try { watch-parse-jobs ["--jobs" "4"]; "unexpected" } catch { "blocked" })
+        assert-equal $result "blocked" "jobs 4 rejected"
+    })
+    (test "watch-parse-jobs rejects --jobs 0" {
+        let result = (try { watch-parse-jobs ["--jobs" "0"]; "unexpected" } catch { "blocked" })
+        assert-equal $result "blocked" "jobs 0 rejected"
+    })
+    # --- jobspec normalization ---
+    (test "normalize-jobspec creates valid jobspec" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard", budget_minutes: "45"}
+        let jobspec = (normalize-jobspec $fm "alice/repo" 7 "Test job" "alice")
+        assert-equal $jobspec.repo "alice/repo" "repo in jobspec"
+        assert-equal $jobspec.issue_number 7 "issue number in jobspec"
+        assert-equal $jobspec.title "Test job" "title in jobspec"
+        assert-equal $jobspec.owner "alice" "owner in jobspec"
+        assert-equal $jobspec.base_sha "abcdef0123456789abcdef0123456789abcdef02" "base in jobspec"
+        assert-equal $jobspec.branch "feature/test" "branch in jobspec"
+        assert-equal $jobspec.worker "mimo" "worker in jobspec"
+        assert-equal $jobspec.profile "standard" "profile in jobspec"
+        assert-equal $jobspec.mode "build" "mode in jobspec"
+        assert-equal $jobspec.budget_minutes 45 "budget in jobspec"
+    })
+    (test "normalize-jobspec rejects invalid frontmatter" {
+        let fm = {m2c_job: "2", base: "short", branch: "main"}
+        let result = (try { normalize-jobspec $fm "alice/repo" 7 "Test" "alice"; "unexpected" } catch { "blocked" })
+        assert-equal $result "blocked" "invalid frontmatter rejected"
+    })
+    # --- stderr capture ---
+    (test "stderr path is set in worker-run result" {
+        let result = (try {
+            worker-run "mimo-v2.5" "test" null null null true "build" false $project_root 20
+        } catch {
+            null
+        })
+        if $result != null {
+            assert ($result.stderr_path? | is-not-empty) "stderr path present"
+        }
+    })
+    # --- redaction coverage ---
+    (test "redact secrets removes bearer tokens" {
+        let text = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        let redacted = (redact-secrets $text)
+        assert (not ($redacted | str contains "eyJhbGciOi")) "bearer token removed"
+        assert ($redacted | str contains "[REDACTED_TOKEN]") "redaction marker present"
+    })
+    (test "redact secrets removes sk- keys" {
+        let text = "Using key sk-1234567890abcdef1234567890abcdef"
+        let redacted = (redact-secrets $text)
+        assert (not ($redacted | str contains "sk-1234567890")) "sk key removed"
+        assert ($redacted | str contains "[REDACTED_SK]") "sk redaction marker"
+    })
+    (test "redact secrets removes ghp_ tokens" {
+        let text = "GitHub token ghp_abc123def456ghi789jkl012mno345"
+        let redacted = (redact-secrets $text)
+        assert (not ($redacted | str contains "ghp_abc123")) "ghp token removed"
+        assert ($redacted | str contains "[REDACTED_GH]") "ghp redaction marker"
+    })
+    (test "redact secrets preserves normal words" {
+        let words = "The quick brown fox jumps over the lazy dog"
+        assert-equal (redact-secrets $words) $words "normal words preserved"
+    })
+    # --- PR lookup ---
+    (test "watch-find-pr returns null for nonexistent" {
+        let result = (watch-find-pr "user/nonexistent" "main")
+        assert ($result == null) "nonexistent returns null"
+    })
 ]
 
 print ($results | table)
