@@ -39,6 +39,8 @@ m2c models
 m2c doctor [--live]
 m2c key status|replace|remove
 m2c checkpoint --workstream NAME
+m2c watch                   persistent GitHub job watcher
+m2c watch --once            check/process one eligible GitHub job, then exit
 m2c version
 m2c uninstall
 ```
@@ -55,9 +57,27 @@ Packet files are supported with `m2c packet FILE`, `m2c standard packet FILE`, o
 
 Use a workstream for related bounded packets. State is kept outside the repository and records only orchestration metadata: cwd, model, OpenCode session ID, packet, timestamps, context estimate, and checkpoint generation. A cwd or model mismatch fails; m2c never silently switches models or reuses a missing session.
 
-Packets should target 10–15 minutes and must not be deliberately larger than 20 minutes. The worker watchdog is implemented with Nushell jobs and kills the worker job at the 20-minute ceiling, returning `status: "timed_out"`. A 30% context estimate recommends checkpointing, 35% is a watch zone, 45% requires `m2c checkpoint`, and 50% rejects another substantive packet. Checkpointing preserves a short knowledge summary and starts the next packet with a fresh OpenCode session.
+Direct workstream packets should normally target 10–15 minutes. Direct `m2c run` / packet execution still uses the 20-minute worker budget by default. GitHub Watch jobs may request an explicit `budget_minutes` from 5 to 120 minutes; if omitted, Watch defaults to 20. Invalid or out-of-range Watch budgets fail closed before claim. The worker watchdog is implemented with Nushell jobs and reports `status: "timed_out"` when the admitted budget is exhausted. A 30% context estimate recommends checkpointing, 35% is a watch zone, 45% requires `m2c checkpoint`, and 50% rejects another substantive packet. Checkpointing preserves a short knowledge summary and starts the next packet with a fresh OpenCode session.
 
 The current usage estimate is `tokens.input + tokens.cache.read`, based on OpenCode's step-finish events. It is an estimate, not a claim of exact provider context accounting; see `docs/CONTEXT_ACCOUNTING.md`.
+
+## GitHub Watch
+
+`m2c watch` polls GitHub for open issues owned by the authenticated user whose title begins with `[M2C QUEUED]`. The current watcher stays running after a job completes; `m2c watch --once` performs one poll, processes one eligible job if present, and returns.
+
+A Watch issue uses frontmatter followed by the bounded worker packet:
+
+```yaml
+---
+m2c_job: 1
+base: <exact 40-character commit SHA>
+branch: <non-main worker branch>
+model: standard
+budget_minutes: 45
+---
+```
+
+`model` must be `standard` or `pro`. `budget_minutes` is optional, defaults to 20, accepts only integer values from 5 through 120 inclusive, and fails closed when present but invalid. Before claiming a job, m2c revalidates the live issue, owner, title/state, base SHA, branch and packet. Completion still requires the requested branch, a clean worktree, a remote branch, and matching local/remote SHA. Worker prose is evidence; these delivery facts are checked mechanically by m2c.
 
 ## Configuration and security
 
