@@ -1676,6 +1676,7 @@ def watch-command [args: list<string>] {
                             print $"Claiming job: ($original_title)"
                             if (watch-claim-job $jobspec.repo $jobspec.issue_number $original_title) {
                                 let job_id = (worker-job-id)
+                                let runtime_jobspec = ($jobspec | insert job_id $job_id | upsert title $original_title)
                                 let job_dir = (job-root | path join $"watch-($job_id)")
                                 mkdir $job_dir
                                 let manifest = {
@@ -1708,7 +1709,7 @@ def watch-command [args: list<string>] {
                                 let packet = $admission.packet
                                 let child_job = (job spawn --description $"m2c runner ($jobspec.repo):($jobspec.branch)" {
                                     try {
-                                        let _runner_result = (controller-runner $job_dir $jobspec $packet)
+                                        let _runner_result = (controller-runner $job_dir $runtime_jobspec $packet)
                                     } catch {|err|
                                         let err_msg = (redact-secrets ($err.msg? | default "runner exception"))
                                         let _result_path = (flight-job-dir $job_id | path join "result.json")
@@ -1751,7 +1752,7 @@ def watch-command [args: list<string>] {
                                 let runner_record = {
                                     job_id: $job_id
                                     job_dir: $job_dir
-                                    jobspec: $jobspec
+                                    jobspec: $runtime_jobspec
                                     resource_key: $resource_key
                                     original_title: $original_title
                                     admission: $admission

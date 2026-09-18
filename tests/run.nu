@@ -2308,6 +2308,275 @@ let results = [
         let freed = ["r1:b1" "r2:b2"]
         assert (watch-slot-acquire $freed "r3:b3" 3).ok "freed slot accepts"
     })
+    # --- regression: runtime job identity propagation ---
+    (test "admission jobspec without job_id receives runtime identity before child sees it" {
+        let fake_repo = ($test_root | path join "runtime-id-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "runtime-id-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let admission_jobspec = {
+            repo: "alice/test-repo"
+            issue_number: 42
+            title: "[M2C QUEUED] Fix runtime identity"
+            owner: "alice"
+            base_sha: $base_sha
+            branch: "mimo/runtime-id-fix"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        assert (not ($admission_jobspec | columns | any {|c| $c == "job_id"})) "admission jobspec has no job_id column"
+        let controller_job_id = (worker-job-id)
+        let runtime_jobspec = ($admission_jobspec | insert job_id $controller_job_id | upsert title "Fix runtime identity")
+        assert ($runtime_jobspec | columns | any {|c| $c == "job_id"}) "runtime jobspec has job_id column"
+        assert-equal $runtime_jobspec.job_id $controller_job_id "runtime job_id matches controller-assigned id"
+        assert-equal $runtime_jobspec.title "Fix runtime identity" "runtime title is clean original title"
+        assert-equal $runtime_jobspec.repo "alice/test-repo" "repo preserved in runtime jobspec"
+        assert-equal $runtime_jobspec.base_sha $base_sha "base_sha preserved in runtime jobspec"
+        assert-equal $runtime_jobspec.branch "mimo/runtime-id-fix" "branch preserved in runtime jobspec"
+        assert-equal $runtime_jobspec.worker "mimo" "worker preserved in runtime jobspec"
+        assert-equal $runtime_jobspec.profile "standard" "profile preserved in runtime jobspec"
+        assert-equal $runtime_jobspec.mode "build" "mode preserved in runtime jobspec"
+        assert-equal $runtime_jobspec.budget_minutes 20 "budget_minutes preserved in runtime jobspec"
+        let test_result = {
+            status: "completed"
+            exit_code: 0
+            tool_calls: 1
+            tool_failures: 0
+            changed_files: ["src/fix.nu"]
+            duration_seconds: 3
+            timed_out: false
+            final_text: "runtime identity fix applied"
+            model: "mimo-v2.5"
+            backend: "opencode"
+            provider: "m2c-mimo"
+            session_id: null
+            workstream: null
+            packet: null
+            budget_minutes: 20
+            context_estimate_tokens: null
+            context_percent: null
+            checkpoint_recommended: false
+            agent: "build"
+        }
+        let backend_file = ($test_root | path join "runtime-id-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        let job_dir = ($test_root | path join $"watch-($controller_job_id)")
+        mkdir $job_dir
+        let manifest = {
+            job_id: $controller_job_id
+            repo: $runtime_jobspec.repo
+            issue_number: $runtime_jobspec.issue_number
+            title: "Fix runtime identity"
+            base_sha: $runtime_jobspec.base_sha
+            branch: $runtime_jobspec.branch
+            worker: $runtime_jobspec.worker
+            profile: $runtime_jobspec.profile
+            mode: $runtime_jobspec.mode
+            budget_minutes: $runtime_jobspec.budget_minutes
+            description: $runtime_jobspec.description
+            resource_key: "alice/test-repo:mimo/runtime-id-fix"
+            claimed_at: (iso-now-utc)
+            m2c_version: "0.2.1"
+            m2c_source_hash: "test"
+        }
+        flight-write-manifest $controller_job_id $manifest
+        flight-append-event $controller_job_id {event: "claimed", repo: $runtime_jobspec.repo, issue: $runtime_jobspec.issue_number}
+        flight-append-event $controller_job_id {event: "runner_start"}
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let result = (controller-runner $job_dir $runtime_jobspec "Fix the runtime identity bug.")
+            assert ($result.exit_code in [0 1]) "runner exit code is valid"
+            assert (not $result.timed_out) "not timed out"
+            assert ($result.result_record | is-not-empty) "result record present"
+        }
+        let written = (flight-read-result $controller_job_id)
+        assert ($written != null) "result.json written"
+        assert-equal $written.job_id $controller_job_id "result.json contains controller-assigned job_id"
+        assert-equal $written.repo "alice/test-repo" "result.json repo preserved"
+        assert ($written.category in ["DONE" "DELIVERY_FAILED" "NO_CHANGES"]) "result category is valid"
+        assert ($written.completed_at | is-not-empty) "completed_at present"
+        let events = (flight-read-events $controller_job_id)
+        assert ($events | any {|e| $e.event == "runner_complete"}) "runner_complete event appended without column error"
+        let runner_complete_events = ($events | where {|e| $e.event == "runner_complete"})
+        assert-equal ($runner_complete_events | length) 1 "exactly one runner_complete event"
+        let job_record = {
+            job_id: $controller_job_id
+            job_dir: $job_dir
+            jobspec: $runtime_jobspec
+            resource_key: "alice/test-repo:mimo/runtime-id-fix"
+            original_title: "Fix runtime identity"
+            admission: {ok: true, packet: "Fix the runtime identity bug."}
+            started_at: (date now)
+            soft_deadline_ns: 999999999999
+            hard_deadline_ns: 999999999999
+            closeout_started: false
+            child_job: null
+            child_tag: (worker-mailbox-tag)
+        }
+        controller-finalize-job $job_record $written
+        let events_after = (flight-read-events $controller_job_id)
+        let finalized_count = ($events_after | where {|e| $e.event == "finalized"} | length)
+        assert-equal $finalized_count 1 "controller finalizes exactly once"
+        let finalized_event = ($events_after | where {|e| $e.event == "finalized"} | first)
+        assert-equal $finalized_event.category $written.category "finalized event matches result category"
+    })
+    (test "runtime jobspec propagates job_id through closeout path" {
+        let fake_repo = ($test_root | path join "closeout-id-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "closeout-id-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let admission_jobspec = {
+            repo: "bob/closeout-repo"
+            issue_number: 99
+            title: "[M2C QUEUED] Closeout identity test"
+            owner: "bob"
+            base_sha: $base_sha
+            branch: "mimo/closeout-id"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        let controller_job_id = (worker-job-id)
+        let runtime_jobspec = ($admission_jobspec | insert job_id $controller_job_id | upsert title "Closeout identity test")
+        let test_result = {
+            status: "completed"
+            exit_code: 0
+            tool_calls: 1
+            tool_failures: 0
+            changed_files: []
+            duration_seconds: 2
+            timed_out: false
+            final_text: "closeout done"
+            model: "mimo-v2.5"
+            backend: "opencode"
+            provider: "m2c-mimo"
+            session_id: null
+            workstream: null
+            packet: null
+            budget_minutes: 5
+            context_estimate_tokens: null
+            context_percent: null
+            checkpoint_recommended: false
+        }
+        let backend_file = ($test_root | path join "closeout-id-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let result = (controller-closeout-runner $work $runtime_jobspec 5 (date now))
+            assert ($result | is-not-empty) "closeout result present"
+        }
+        let written = (flight-read-result $controller_job_id)
+        assert ($written != null) "closeout result written"
+        assert-equal $written.job_id $controller_job_id "closeout result contains controller-assigned job_id"
+        assert-equal $written.closeout_ran true "closeout_ran is true"
+        let events = (flight-read-events $controller_job_id)
+        assert ($events | any {|e| $e.event == "closeout_start"}) "closeout_start event"
+        assert ($events | any {|e| $e.event == "closeout_end"}) "closeout_end event"
+        assert ($events | any {|e| $e.event == "runner_complete"}) "runner_complete after closeout"
+    })
+    (test "admission jobspec without job_id: child exception still writes INTERNAL_ERROR with correct job_id" {
+        let job_id = "no-id-except-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let fake_repo = ($test_root | path join "no-id-except-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "no-id-except-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let admission_jobspec = {
+            repo: "test/no-id-except"
+            issue_number: 7
+            title: "[M2C QUEUED] Exception with runtime id"
+            owner: "test"
+            base_sha: $base_sha
+            branch: "mimo/no-id-except"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        assert (not ($admission_jobspec | columns | any {|c| $c == "job_id"})) "admission jobspec has no job_id"
+        let runtime_jobspec = ($admission_jobspec | insert job_id $job_id | upsert title "Exception with runtime id")
+        assert-equal $runtime_jobspec.job_id $job_id "runtime job_id set"
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/no-id-except", resource_key: "test/no-id-except:mimo/no-id-except"}
+        flight-append-event $job_id {event: "runner_start"}
+        let child_tag = (worker-mailbox-tag)
+        let backend_file = ($test_root | path join "nonexistent-no-id-backend.json")
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let child_job = (job spawn --description "test no-id exception" {
+                try {
+                    let _r = (controller-runner $job_dir $runtime_jobspec "test")
+                } catch {|err|
+                    let err_msg = (redact-secrets ($err.msg? | default "runner exception"))
+                    let _result_path = (flight-job-dir $job_id | path join "result.json")
+                    flight-append-event $job_id {event: "runner_exception", error: $err_msg}
+                    if not ($_result_path | path exists) {
+                        let result_record = {
+                            job_id: $job_id
+                            repo: $runtime_jobspec.repo
+                            issue_number: $runtime_jobspec.issue_number
+                            title: "Exception with runtime id"
+                            worker: $runtime_jobspec.worker
+                            profile: $runtime_jobspec.profile
+                            mode: $runtime_jobspec.mode
+                            budget_minutes: $runtime_jobspec.budget_minutes
+                            description: $runtime_jobspec.description
+                            category: "INTERNAL_ERROR"
+                            failure_signature: "runner_exception"
+                            duration_seconds: 0
+                            exit_code: 1
+                            timed_out: false
+                            local_branch: ""
+                            local_sha: ""
+                            worktree_clean: false
+                            remote_exists: false
+                            remote_sha: ""
+                            sha_match: false
+                            branch_match: false
+                            changed_file_count: 0
+                            tool_calls: 0
+                            tool_failures: 0
+                            completed_at: (iso-now-utc)
+                            closeout_ran: false
+                        }
+                        flight-write-result $job_id $result_record
+                    }
+                }
+                {done: true} | job send 0 --tag $child_tag
+            })
+            let msg = (try { job recv --tag $child_tag --timeout 30sec } catch { null })
+            assert ($msg != null) "child sent terminal message despite exception"
+        }
+        let result = (flight-read-result $job_id)
+        assert ($result != null) "result.json written after child exception"
+        assert-equal $result.job_id $job_id "result.json has correct job_id"
+        assert-equal $result.category "INTERNAL_ERROR" "category is INTERNAL_ERROR"
+        assert-equal $result.failure_signature "runner_exception" "failure signature is runner_exception"
+    })
 ]
 
 print ($results | table)
