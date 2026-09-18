@@ -2638,7 +2638,7 @@ let results = [
     })
     (test "live-panel-state derives free capacity from max minus active" {
         let now = (date now)
-        let job1 = {job_id: "j1", original_title: "Job A", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r1:b1", job_dir: "/tmp/j1", child_job: null, child_tag: 1, admission: {}}
+        let job1 = {job_id: "j1", original_title: "Job A", jobspec: {profile: "standard", title: "Job A"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r1:b1", job_dir: "/tmp/j1", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job1] 3 2)
         assert-equal ($state.active | length) 1 "one active"
         assert-equal $state.free 2 "2 free slots"
@@ -2646,31 +2646,31 @@ let results = [
     })
     (test "live-panel-state shows WORKING phase when not in closeout" {
         let now = (date now)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "pro"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "pro", title: "Test"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         assert-equal ($state.active.0.phase) "WORKING" "working phase"
     })
     (test "live-panel-state shows CLOSEOUT phase when in closeout" {
         let now = (date now)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: true, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard", title: "Test"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: true, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         assert-equal ($state.active.0.phase) "CLOSEOUT" "closeout phase"
     })
     (test "live-panel-state derives MiMo Pro profile display" {
         let now = (date now)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "pro"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "pro", title: "Test"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         assert-equal ($state.active.0.profile) "MiMo Pro" "pro profile"
     })
     (test "live-panel-state derives MiMo Standard profile display" {
         let now = (date now)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard", title: "Test"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         assert-equal ($state.active.0.profile) "MiMo Standard" "standard profile"
     })
     (test "live-panel-state elapsed is derived from actual started_at" {
         let started = ((date now) - 738sec)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $started, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard", title: "Test"}, started_at: $started, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         assert ($state.active.0.elapsed_seconds >= 737) "elapsed at least 737s"
         assert ($state.active.0.elapsed_seconds <= 740) "elapsed at most 740s"
@@ -2680,7 +2680,7 @@ let results = [
         let budget_minutes = 20
         let soft_ns = (soft-deadline-ns $budget_minutes)
         let hard_ns = (watchdog-limit-from-budget $budget_minutes)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $started, soft_deadline_ns: $soft_ns, hard_deadline_ns: $hard_ns, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard", title: "Test"}, started_at: $started, soft_deadline_ns: $soft_ns, hard_deadline_ns: $hard_ns, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         let expected_soft = ($started + ($soft_ns / 1000000000 | math round | into int | into duration --unit sec))
         let expected_hard = ($started + ($hard_ns / 1000000000 | math round | into int | into duration --unit sec))
@@ -2696,7 +2696,7 @@ let results = [
         assert (($frame | first) | str contains "watching") "header contains watching"
         assert (($frame | first) | str contains "0 active") "header shows 0 active"
         assert (($frame | first) | str contains "1 queued") "header shows 1 queued"
-        assert (($frame | first) | str contains "0.2.3") "header contains version"
+        assert (($frame | first) | str contains "0.2.4") "header contains version"
     })
     (test "live-panel-frame shows active job details" {
         let now = (date now)
@@ -2764,7 +2764,7 @@ let results = [
     # --- live panel: no fake telemetry ---
     (test "live-panel-state has no percentage complete" {
         let now = (date now)
-        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let job = {job_id: "j1", original_title: "Test", jobspec: {profile: "standard", title: "Test"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let state = (live-panel-state [$job] 3 0)
         let active = ($state.active.0)
         assert (not ($active | columns | any {|c| $c == "percent"})) "no percent field"
@@ -2784,7 +2784,7 @@ let results = [
     # --- live panel: phase labels only from mechanical state ---
     (test "live-panel-state phase is only WORKING or CLOSEOUT" {
         let now = (date now)
-        let working = {job_id: "j1", original_title: "T", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let working = {job_id: "j1", original_title: "T", jobspec: {profile: "standard", title: "T"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
         let closeout = ($working | merge {closeout_started: true})
         let s1 = (live-panel-state [$working] 3 0)
         let s2 = (live-panel-state [$closeout] 3 0)
@@ -2827,8 +2827,8 @@ let results = [
         }
     })
     # --- live panel: version value is 0.2.3 ---
-    (test "version-value returns 0.2.3" {
-        assert-equal (version-value) "0.2.3" "version bumped"
+    (test "version-value returns 0.2.4" {
+        assert-equal (version-value) "0.2.4" "version bumped"
     })
     # --- live panel: queue count reflects controller truth ---
     (test "live-panel-state queued count passes through from controller" {
@@ -2841,7 +2841,7 @@ let results = [
     (test "live-panel-state free slots is max minus active count" {
         let now = (date now)
         let make_job = {|id|
-            {job_id: $id, original_title: $"Job ($id)", jobspec: {profile: "standard"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: $"r($id):b($id)", job_dir: $"/tmp/($id)", child_job: null, child_tag: 1, admission: {}}
+            {job_id: $id, original_title: $"Job ($id)", jobspec: {profile: "standard", title: $"Job ($id)"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: $"r($id):b($id)", job_dir: $"/tmp/($id)", child_job: null, child_tag: 1, admission: {}}
         }
         let j1 = (do $make_job "a")
         let j2 = (do $make_job "b")
@@ -2850,6 +2850,1054 @@ let results = [
         assert-equal (live-panel-state [$j1] 3 0).free 2 "1 job = 2 free"
         assert-equal (live-panel-state [$j1 $j2] 3 0).free 1 "2 jobs = 1 free"
         assert-equal (live-panel-state [$j1 $j2 $j3] 3 0).free 0 "3 jobs = 0 free"
+    })
+    # --- description resolution ---
+    (test "explicit description wins over title" {
+        let jobspec = {repo: "alice/repo", issue_number: 7, title: "[M2C QUEUED] Fix auth", description: "Add OAuth2 support"}
+        assert-equal (resolve-description $jobspec) "Add OAuth2 support" "explicit description used"
+    })
+    (test "missing description falls back to title" {
+        let jobspec = {repo: "alice/repo", issue_number: 7, title: "Fix auth bug", description: null}
+        assert-equal (resolve-description $jobspec) "Fix auth bug" "title used when no description"
+    })
+    (test "final fallback is repo and issue when title is empty" {
+        let jobspec = {repo: "alice/repo", issue_number: 42, title: "", description: null}
+        assert-equal (resolve-description $jobspec) "alice/repo #42" "repo #issue fallback"
+    })
+    (test "blank description behaves as missing" {
+        let jobspec = {repo: "alice/repo", issue_number: 5, title: "Test job", description: "   "}
+        assert-equal (resolve-description $jobspec) "Test job" "blank description ignored"
+    })
+    (test "whitespace-only description behaves as missing" {
+        let jobspec = {repo: "alice/repo", issue_number: 3, title: "Ship it", description: "\t\n  "}
+        assert-equal (resolve-description $jobspec) "Ship it" "whitespace description ignored"
+    })
+    (test "description is bounded to 72 characters with ellipsis" {
+        let long_desc = ("a" | fill -a right -w 100 -c 'a')
+        let jobspec = {repo: "alice/repo", issue_number: 1, title: "Test", description: $long_desc}
+        let resolved = (resolve-description $jobspec)
+        assert (($resolved | str length) <= 75) "bounded to 72 + ellipsis (75 bytes)"
+        assert ($resolved | str ends-with "…") "ends with ellipsis"
+    })
+    (test "description sanitizes newlines and tabs" {
+        let jobspec = {repo: "alice/repo", issue_number: 1, title: "Test", description: "Fix\nthe\tbug\rproperly"}
+        assert-equal (resolve-description $jobspec) "Fix the bug properly" "newlines and tabs replaced"
+    })
+    (test "all M2C title prefixes are stripped for fallback" {
+        let cases = [
+            {input: "[M2C QUEUED] Test", expected: "Test"}
+            {input: "[M2C RUNNING] Test", expected: "Test"}
+            {input: "[M2C DONE] Test", expected: "Test"}
+            {input: "[M2C FAILED] Test", expected: "Test"}
+            {input: "[M2C BLOCKED] Test", expected: "Test"}
+            {input: "[M2C TIMED_OUT] Test", expected: "Test"}
+        ]
+        for case in $cases {
+            assert-equal (clean-title-prefix $case.input) $case.expected $"prefix stripped: ($case.input)"
+        }
+    })
+    (test "clean-title-prefix removes M2C RUNNING prefix" {
+        assert-equal (clean-title-prefix "[M2C RUNNING] Fix auth") "Fix auth" "RUNNING stripped"
+    })
+    (test "clean-title-prefix removes M2C QUEUED prefix" {
+        assert-equal (clean-title-prefix "[M2C QUEUED] Fix auth") "Fix auth" "QUEUED stripped"
+    })
+    (test "clean-title-prefix leaves clean title unchanged" {
+        assert-equal (clean-title-prefix "Fix auth bug") "Fix auth bug" "clean title preserved"
+    })
+    (test "sanitize-description collapses multiple spaces" {
+        assert-equal (sanitize-description "Fix  the   bug") "Fix the bug" "spaces collapsed"
+    })
+    (test "sanitize-description trims leading and trailing whitespace" {
+        assert-equal (sanitize-description "  Fix auth  ") "Fix auth" "trimmed"
+    })
+    (test "sanitize-description returns null for empty string" {
+        assert (null == (sanitize-description "")) "empty returns null"
+    })
+    (test "sanitize-description returns null for whitespace-only string" {
+        assert (null == (sanitize-description "   ")) "whitespace returns null"
+    })
+    (test "live-panel-state uses resolved description from jobspec" {
+        let now = (date now)
+        let job = {job_id: "j1", original_title: "Fix auth", jobspec: {profile: "standard", repo: "alice/repo", issue_number: 7, title: "Fix auth", description: "Add OAuth2"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        assert-equal $state.active.0.title "Add OAuth2" "explicit description used in panel"
+    })
+    (test "live-panel-state falls back to title when no description" {
+        let now = (date now)
+        let job = {job_id: "j1", original_title: "Fix auth", jobspec: {profile: "standard", repo: "alice/repo", issue_number: 7, title: "Fix auth"}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        assert-equal $state.active.0.title "Fix auth" "title used"
+    })
+    (test "live-panel-state falls back to repo #issue when no description and empty title" {
+        let now = (date now)
+        let job = {job_id: "j1", original_title: "", jobspec: {profile: "standard", repo: "alice/repo", issue_number: 7, title: ""}, started_at: $now, soft_deadline_ns: 960000000000, hard_deadline_ns: 1200000000000, closeout_started: false, resource_key: "r:b", job_dir: "/tmp/j", child_job: null, child_tag: 1, admission: {}}
+        let state = (live-panel-state [$job] 3 0)
+        assert-equal $state.active.0.title "alice/repo #7" "repo #issue fallback"
+    })
+    (test "live-panel-frame shows description once without scroll growth" {
+        let now = (date now)
+        let job = {title: "Add OAuth2 support", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 100, closeout_at: $now, deadline_at: ($now + 60sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now}
+        let frame1 = (live-panel-frame $state)
+        let frame2 = (live-panel-frame $state)
+        assert-equal ($frame1 | length) ($frame2 | length) "frame height stable"
+        let count1 = ($frame1 | where {|line| $line | str contains "Add OAuth2 support"} | length)
+        assert-equal $count1 1 "description appears exactly once"
+    })
+    (test "live-panel-frame narrow layout remains clean with description" {
+        let now = (date now)
+        let long_title = ("A" | fill -a right -w 80 -c 'A')
+        let job = {title: $long_title, profile: "MiMo Pro", phase: "WORKING", elapsed_seconds: 100, closeout_at: $now, deadline_at: ($now + 60sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now}
+        let frame = (live-panel-frame $state)
+        assert (($frame | length) > 0) "narrow frame non-empty"
+        for line in $frame {
+            assert (($line | describe) == "string") "each line is a string"
+        }
+    })
+    # --- live panel redraw: cursor math correctness ---
+    (test "live-build-panel-bytes first render has no cursor-up" {
+        let esc = (char --integer 27)
+        let frame = ["header" "" "footer"]
+        let result = (live-build-panel-bytes $frame 0)
+        let has_cu_a = ($result.bytes | str contains $"($esc)[1A")
+        let has_cu_2a = ($result.bytes | str contains $"($esc)[2A")
+        let has_cu_3a = ($result.bytes | str contains $"($esc)[3A")
+        assert (not $has_cu_a) "no cursor-up 1 in first render"
+        assert (not $has_cu_2a) "no cursor-up 2 in first render"
+        assert (not $has_cu_3a) "no cursor-up 3 in first render"
+        assert-equal $result.owned 3 "owned matches frame length"
+    })
+    (test "live-build-panel-bytes second render uses cursor-up previous_lines minus 1" {
+        let esc = (char --integer 27)
+        let frame = ["header" "" "footer"]
+        let first = (live-build-panel-bytes $frame 0)
+        let second = (live-build-panel-bytes $frame $first.owned)
+        assert ($second.bytes | str contains $"($esc)[2A") "cursor-up (owned-1)=2 present"
+        assert-equal $second.owned 3 "owned stable"
+    })
+    (test "live-build-panel-bytes N refreshes keep same owned count" {
+        let frame = ["header" "" "line1" "line2" "footer"]
+        mut owned = 0
+        for i in 0..5 {
+            let result = (live-build-panel-bytes $frame $owned)
+            $owned = $result.owned
+        }
+        assert-equal $owned 5 "owned remains 5 after 6 refreshes"
+    })
+    (test "live-build-panel-bytes output contains no line feed bytes" {
+        let frame = ["line1" "line2" "line3"]
+        let result = (live-build-panel-bytes $frame 0)
+        let lf = (char --integer 10)
+        assert (not ($result.bytes | str contains $lf)) "no LF byte that causes scroll"
+    })
+    (test "live-build-panel-bytes redraw contains no line feed bytes" {
+        let frame = ["line1" "line2" "line3"]
+        let first = (live-build-panel-bytes $frame 0)
+        let second = (live-build-panel-bytes $frame $first.owned)
+        let lf = (char --integer 10)
+        assert (not ($second.bytes | str contains $lf)) "no LF in redraw"
+    })
+    (test "live-build-panel-bytes uses cursor-down sequences for inter-line movement" {
+        let esc = (char --integer 27)
+        let frame = ["line1" "line2" "line3"]
+        let result = (live-build-panel-bytes $frame 0)
+        assert ($result.bytes | str contains $"($esc)[1B") "cursor-down present for inter-line movement"
+    })
+    (test "live-build-panel-bytes cursor-up count is previous_lines minus 1" {
+        let esc = (char --integer 27)
+        let frame = ["a" "b" "c" "d"]
+        let result = (live-build-panel-bytes $frame 4)
+        assert ($result.bytes | str contains $"($esc)[3A") "cursor-up (4-1)=3 for 4 previous lines"
+    })
+    (test "live-build-panel-bytes shrinking frame clears extra lines" {
+        let esc = (char --integer 27)
+        let big_frame = ["a" "b" "c" "d" "e"]
+        let small_frame = ["a" "b"]
+        let first = (live-build-panel-bytes $big_frame 0)
+        let second = (live-build-panel-bytes $small_frame $first.owned)
+        assert ($second.bytes | str contains $"($esc)[2K") "clear-line present"
+        assert ($second.bytes | str contains $"($esc)[4A") "cursor-up (5-1)=4 for extra line handling"
+        assert-equal $second.owned 2 "owned shrinks to 2"
+    })
+    (test "live-build-clear-bytes returns empty for zero previous_lines" {
+        let result = (live-build-clear-bytes 0)
+        assert-equal $result.bytes "" "empty bytes"
+        assert-equal $result.owned 0 "owned is 0"
+    })
+    (test "live-build-clear-bytes uses cursor-up previous_lines minus 1" {
+        let esc = (char --integer 27)
+        let result = (live-build-clear-bytes 5)
+        assert ($result.bytes | str contains $"($esc)[4A") "cursor-up (5-1)=4"
+        assert ($result.bytes | str contains $"($esc)[?25h") "cursor visible"
+        assert-equal $result.owned 0 "owned is 0 after clear"
+    })
+    (test "live-build-clear-bytes output contains no line feed bytes" {
+        let result = (live-build-clear-bytes 3)
+        let lf = (char --integer 10)
+        assert (not ($result.bytes | str contains $lf)) "no LF byte in clear output"
+    })
+    (test "two identical renders produce no extra line feed overhead" {
+        let frame = ["header" "" "footer"]
+        let first = (live-build-panel-bytes $frame 0)
+        let second = (live-build-panel-bytes $frame $first.owned)
+        let lf = (char --integer 10)
+        assert (not ($first.bytes | str contains $lf)) "first render: no LF"
+        assert (not ($second.bytes | str contains $lf)) "second render: no LF"
+        assert-equal $first.owned $second.owned "owned count identical"
+    })
+    (test "zero-active to one-active transition does not creep downward" {
+        let zero_frame = (live-panel-frame {active: [], queued: 0, free: 3, max_slots: 3, now: (date now)})
+        let zero_result = (live-build-panel-bytes $zero_frame 0)
+        let one_frame = (live-panel-frame {active: [{title: "J", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 10, closeout_at: (date now), deadline_at: (date now)}], queued: 0, free: 2, max_slots: 3, now: (date now)})
+        let one_result = (live-build-panel-bytes $one_frame $zero_result.owned)
+        assert ($one_result.owned > $zero_result.owned) "panel grows"
+        let lf = (char --integer 10)
+        assert (not ($one_result.bytes | str contains $lf)) "no LF in transition bytes"
+    })
+    (test "redirected mode output has no ANSI escape bytes" {
+        let zero_state = (live-panel-state [] 3 0)
+        let frame = (live-panel-frame $zero_state)
+        let text = ($frame | str join "\n")
+        assert (not ($text | str contains (char --integer 27))) "no ANSI in redirected frame text"
+    })
+    # === branch preparation regression tests (fix sequential same-branch continuation) ===
+    # test 1: no remote target branch => starts exactly at declared base
+    (test "controller-prepare-branch: fresh branch starts at declared base" {
+        let repo_dir = ($test_root | path join "prep-fresh-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-fresh-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_dir = ($test_root | path join "prep-fresh-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let prep = (controller-prepare-branch $clone_dir "mimo/fresh" $base_sha "prep-test-001")
+        assert $prep.ok "fresh branch preparation succeeds"
+        assert-equal $prep.effective_start_sha $base_sha "effective start SHA equals declared base"
+        assert (not $prep.remote_existed) "remote did not exist"
+        assert-equal $prep.remote_start_sha "" "no remote start SHA"
+        let head_sha = ((run-external "git" "-C" $clone_dir "rev-parse" "HEAD" | complete).stdout | str trim)
+        assert-equal $head_sha $base_sha "HEAD is at declared base"
+        let current_branch = ((run-external "git" "-C" $clone_dir "branch" "--show-current" | complete).stdout | str trim)
+        assert-equal $current_branch "mimo/fresh" "on correct branch"
+    })
+    # test 2: remote target branch equal to base => resumes correctly
+    (test "controller-prepare-branch: remote equal to base resumes at remote head" {
+        let repo_dir = ($test_root | path join "prep-equal-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-equal-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/equal" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/equal" | complete) | ignore
+        let clone_dir = ($test_root | path join "prep-equal-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let prep = (controller-prepare-branch $clone_dir "mimo/equal" $base_sha "prep-test-002")
+        assert $prep.ok "remote-equal branch preparation succeeds"
+        assert-equal $prep.effective_start_sha $base_sha "effective start SHA equals remote head"
+        assert $prep.remote_existed "remote existed"
+        assert-equal $prep.remote_start_sha $base_sha "remote start SHA equals base"
+    })
+    # test 3: remote target branch ahead of base => starts at remote head
+    (test "controller-prepare-branch: remote ahead of base starts at remote head" {
+        let repo_dir = ($test_root | path join "prep-ahead-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-ahead-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/ahead" | complete) | ignore
+        ("# work from job A" | save --force ($work | path join "WORK.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "job A work" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/ahead" | complete) | ignore
+        let remote_head = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        assert ($remote_head != $base_sha) "remote head is different from base"
+        let clone_dir = ($test_root | path join "prep-ahead-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let prep = (controller-prepare-branch $clone_dir "mimo/ahead" $base_sha "prep-test-003")
+        assert $prep.ok "remote-ahead branch preparation succeeds"
+        assert-equal $prep.effective_start_sha $remote_head "effective start SHA is remote head, not stale base"
+        assert $prep.remote_existed "remote existed"
+        assert-equal $prep.remote_start_sha $remote_head "remote start SHA is remote head"
+        let head_sha = ((run-external "git" "-C" $clone_dir "rev-parse" "HEAD" | complete).stdout | str trim)
+        assert-equal $head_sha $remote_head "HEAD is at remote head, not stale base"
+    })
+    # test 4: sequential job B sees commit pushed by job A
+    (test "controller-prepare-branch: sequential job B resumes from job A push" {
+        let repo_dir = ($test_root | path join "prep-seq-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-seq-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/seq" | complete) | ignore
+        ("# job A work" | save --force ($work | path join "A.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "job A" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/seq" | complete) | ignore
+        let job_a_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_b = ($test_root | path join "prep-seq-clone-b")
+        (run-external "git" "clone" $repo_dir $clone_b | complete) | ignore
+        let prep_b = (controller-prepare-branch $clone_b "mimo/seq" $base_sha "prep-test-004")
+        assert $prep_b.ok "job B preparation succeeds"
+        assert-equal $prep_b.effective_start_sha $job_a_sha "job B starts at job A's push, not stale base"
+        assert $prep_b.remote_existed "remote existed for job B"
+        let head_b = ((run-external "git" "-C" $clone_b "rev-parse" "HEAD" | complete).stdout | str trim)
+        assert-equal $head_b $job_a_sha "job B HEAD is at job A's push"
+    })
+    # test 5: base not ancestor of existing remote head => fail closed
+    (test "controller-prepare-branch: base not ancestor of remote head fails closed" {
+        let repo_dir = ($test_root | path join "prep-unrelated-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-unrelated-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/unrelated" | complete) | ignore
+        ("# unrelated work" | save --force ($work | path join "UNRELATED.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "unrelated" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/unrelated" | complete) | ignore
+        let remote_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "main" | complete) | ignore
+        ("# diverged" | save --force ($work | path join "DIVERGED.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "diverge" | complete) | ignore
+        let fake_base = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        assert ($fake_base != $base_sha) "fake base is different from original"
+        let clone_dir = ($test_root | path join "prep-unrelated-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let prep = (controller-prepare-branch $clone_dir "mimo/unrelated" $fake_base "prep-test-005")
+        assert (not $prep.ok) "non-ancestor base fails closed"
+        assert ($prep.reason | str contains "not an ancestor") "reason mentions not ancestor"
+        assert $prep.remote_existed "remote existed"
+        assert-equal $prep.remote_start_sha $remote_sha "remote start SHA is reported"
+    })
+    # test 6: effective_start_sha is the single source of truth for changed-file comparison
+    (test "controller-prepare-branch: effective_start_sha differs from base when remote ahead" {
+        let repo_dir = ($test_root | path join "prep-truth-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-truth-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let old_base = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/truth" | complete) | ignore
+        ("# prior work" | save --force ($work | path join "PRIOR.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "prior" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/truth" | complete) | ignore
+        let remote_head = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_dir = ($test_root | path join "prep-truth-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let prep = (controller-prepare-branch $clone_dir "mimo/truth" $old_base "prep-test-006")
+        assert $prep.ok "preparation succeeds"
+        assert ($prep.effective_start_sha != $old_base) "effective_start_sha differs from stale declared base"
+        assert-equal $prep.effective_start_sha $remote_head "effective_start_sha equals remote head"
+    })
+    # test 7: flight recorder captures branch_prepare event
+    (test "controller-prepare-branch: flight recorder captures branch_prepare event" {
+        let repo_dir = ($test_root | path join "prep-flight-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-flight-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_dir = ($test_root | path join "prep-flight-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let job_id = "prep-flight-001"
+        let _prep = (controller-prepare-branch $clone_dir "mimo/flight" $base_sha $job_id)
+        let events = (flight-read-events $job_id)
+        assert ($events | any {|e| $e.event == "branch_prepare"}) "branch_prepare event recorded"
+        let prep_event = ($events | where {|e| $e.event == "branch_prepare"} | first)
+        assert ($prep_event.result? | is-not-empty) "result field present"
+        assert ($prep_event.effective_start_sha? | is-not-empty) "effective_start_sha present"
+    })
+    # test 8: same repo+branch serialization unchanged (resource key blocking still works)
+    (test "same repo+branch serialization unchanged after branch preparation fix" {
+        let active = ["alice/repo:mimo/branch"]
+        let slot_check = (watch-slot-acquire $active "alice/repo:mimo/branch" 3)
+        assert (not $slot_check.ok) "same resource key still blocked"
+        let different = (watch-slot-acquire $active "alice/repo:mimo/other" 3)
+        assert $different.ok "different branch still allowed"
+    })
+    # test: branch_prepare event for fresh branch has correct result
+    (test "controller-prepare-branch: fresh branch event has created_fresh result" {
+        let repo_dir = ($test_root | path join "prep-evfresh-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-evfresh-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_dir = ($test_root | path join "prep-evfresh-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let job_id = "prep-evfresh-001"
+        let _prep = (controller-prepare-branch $clone_dir "mimo/ev-fresh" $base_sha $job_id)
+        let events = (flight-read-events $job_id)
+        let prep_event = ($events | where {|e| $e.event == "branch_prepare"} | first)
+        assert-equal $prep_event.result "created_fresh" "fresh branch result is created_fresh"
+    })
+    # test: branch_prepare event for resumed branch has correct result
+    (test "controller-prepare-branch: resumed branch event has resumed_existing result" {
+        let repo_dir = ($test_root | path join "prep-evresume-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-evresume-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/ev-resume" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/ev-resume" | complete) | ignore
+        let clone_dir = ($test_root | path join "prep-evresume-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let job_id = "prep-evresume-001"
+        let _prep = (controller-prepare-branch $clone_dir "mimo/ev-resume" $base_sha $job_id)
+        let events = (flight-read-events $job_id)
+        let prep_event = ($events | where {|e| $e.event == "branch_prepare"} | first)
+        assert-equal $prep_event.result "resumed_existing" "resumed branch result is resumed_existing"
+    })
+    # test: branch_prepare event for rejected base has correct result
+    (test "controller-prepare-branch: rejected base event has rejected result" {
+        let repo_dir = ($test_root | path join "prep-evreject-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-evreject-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        (run-external "git" "-C" $work "checkout" "-b" "mimo/ev-reject" | complete) | ignore
+        ("# work" | save --force ($work | path join "W.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "work" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "mimo/ev-reject" | complete) | ignore
+        (run-external "git" "-C" $work "checkout" "main" | complete) | ignore
+        ("# diverge" | save --force ($work | path join "D.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "diverge" | complete) | ignore
+        let fake_base = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_dir = ($test_root | path join "prep-evreject-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let job_id = "prep-evreject-001"
+        let _prep = (controller-prepare-branch $clone_dir "mimo/ev-reject" $fake_base $job_id)
+        let events = (flight-read-events $job_id)
+        let prep_event = ($events | where {|e| $e.event == "branch_prepare"} | first)
+        assert-equal $prep_event.result "rejected" "rejected base result is rejected"
+    })
+    # test: base_not_ancestor failure signature exists
+    (test "failure signature base_not_ancestor is distinct from remote_missing" {
+        let summary = {status: "failed", exit_code: 1}
+        let delivery = {worktree_clean: true, remote_exists: true, sha_match: false, branch_match: true}
+        let sig = (normalize-failure-signature $summary $delivery "DELIVERY_FAILED")
+        assert-equal $sig "remote_sha_mismatch" "non-ancestor with remote exists produces remote_sha_mismatch"
+    })
+    # test: branch_prepare record shape is complete
+    (test "controller-prepare-branch: result record has all required fields" {
+        let repo_dir = ($test_root | path join "prep-shape-repo")
+        mkdir $repo_dir
+        (run-external "git" "-C" $repo_dir "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "prep-shape-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $repo_dir $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let clone_dir = ($test_root | path join "prep-shape-clone")
+        (run-external "git" "clone" $repo_dir $clone_dir | complete) | ignore
+        let prep = (controller-prepare-branch $clone_dir "mimo/shape" $base_sha "prep-shape-001")
+        assert ($prep | columns | any {|c| $c == "ok"}) "ok field present"
+        assert ($prep | columns | any {|c| $c == "reason"}) "reason field present"
+        assert ($prep | columns | any {|c| $c == "branch"}) "branch field present"
+        assert ($prep | columns | any {|c| $c == "declared_base_sha"}) "declared_base_sha field present"
+        assert ($prep | columns | any {|c| $c == "effective_start_sha"}) "effective_start_sha field present"
+        assert ($prep | columns | any {|c| $c == "remote_existed"}) "remote_existed field present"
+        assert ($prep | columns | any {|c| $c == "remote_start_sha"}) "remote_start_sha field present"
+        assert-equal $prep.branch "mimo/shape" "branch value correct"
+        assert-equal $prep.declared_base_sha $base_sha "declared_base_sha value correct"
+    })
+    # === fix soft-deadline closeout result race (phase ownership) ===
+    (test "controller-result-authoritative: main result is authoritative before closeout" {
+        let main_result = {phase: "main", generation: 0, category: "DONE"}
+        assert (controller-result-authoritative $main_result false) "main result finalizes when closeout not started"
+    })
+    (test "controller-result-authoritative: main result is NOT authoritative after closeout starts" {
+        let main_result = {phase: "main", generation: 0, category: "PARTIAL"}
+        assert (not (controller-result-authoritative $main_result true)) "main result superseded when closeout started"
+    })
+    (test "controller-result-authoritative: closeout result is authoritative after closeout starts" {
+        let closeout_result = {phase: "closeout", generation: 1, category: "DONE"}
+        assert (controller-result-authoritative $closeout_result true) "closeout result finalizes when closeout started"
+    })
+    (test "controller-result-authoritative: null result is never authoritative" {
+        assert (not (controller-result-authoritative null false)) "null result not authoritative before closeout"
+        assert (not (controller-result-authoritative null true)) "null result not authoritative after closeout"
+    })
+    (test "controller-result-authoritative: result without phase field defaults to main" {
+        let legacy_result = {category: "DONE", closeout_ran: false}
+        assert (controller-result-authoritative $legacy_result false) "legacy result authoritative before closeout"
+        assert (not (controller-result-authoritative $legacy_result true)) "legacy result not authoritative after closeout"
+    })
+    (test "controller-result-authoritative: generation 1 result is authoritative regardless of phase" {
+        let gen1 = {phase: "main", generation: 1, category: "DONE"}
+        assert (controller-result-authoritative $gen1 true) "generation 1 is authoritative even with main phase"
+    })
+    (test "controller-run-main writes phase main and generation 0" {
+        let fake_repo = ($test_root | path join "phase-main-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "phase-main-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let test_result = {status: "completed", exit_code: 0, tool_calls: 1, tool_failures: 0, changed_files: [], duration_seconds: 1, timed_out: false, final_text: "done", model: "mimo-v2.5", backend: "opencode", provider: "m2c-mimo", session_id: null, workstream: null, packet: null, budget_minutes: 20, context_estimate_tokens: null, context_percent: null, checkpoint_recommended: false, agent: "build"}
+        let backend_file = ($test_root | path join "phase-main-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        let job_id = "phase-main-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let job_spec = {job_id: $job_id, repo: "local/phase", issue_number: 1, title: "Phase test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/phase", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let result = (controller-runner $job_dir $job_spec "Phase test work.")
+            assert ($result.result_record | is-not-empty) "result record present"
+        }
+        let written = (flight-read-result $job_id)
+        assert ($written != null) "result written"
+        assert-equal ($written.phase? | default "MISSING") "main" "phase is main"
+        assert-equal ($written.generation? | default (-1)) 0 "generation is 0"
+    })
+    (test "controller-closeout-runner writes phase closeout and generation 1" {
+        let fake_repo = ($test_root | path join "phase-closeout-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "phase-closeout-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let test_result = {status: "completed", exit_code: 0, tool_calls: 1, tool_failures: 0, changed_files: [], duration_seconds: 1, timed_out: false, final_text: "closeout done", model: "mimo-v2.5", backend: "opencode", provider: "m2c-mimo", session_id: null, workstream: null, packet: null, budget_minutes: 5, context_estimate_tokens: null, context_percent: null, checkpoint_recommended: false}
+        let backend_file = ($test_root | path join "phase-closeout-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        let job_id = "phase-closeout-001"
+        let job_spec = {job_id: $job_id, repo: "local/phase", issue_number: 2, title: "Phase closeout test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/phase-closeout", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let result = (controller-closeout-runner $work $job_spec 5 (date now))
+            assert ($result | is-not-empty) "closeout result present"
+        }
+        let written = (flight-read-result $job_id)
+        assert ($written != null) "closeout result written"
+        assert-equal ($written.phase? | default "MISSING") "closeout" "phase is closeout"
+        assert-equal ($written.generation? | default (-1)) 1 "generation is 1"
+        assert-equal $written.closeout_ran true "closeout_ran is true"
+    })
+    (test "closeout race: stale main result superseded, closeout result finalizes" {
+        let job_id = "race-closeout-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let jobspec = {job_id: $job_id, repo: "test/race", issue_number: 10, title: "Race test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/race", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/race", resource_key: "test/race:mimo/race"}
+        flight-append-event $job_id {event: "claimed", repo: "test/race", issue: 10}
+        flight-append-event $job_id {event: "runner_start"}
+        let stale_main_result = {
+            job_id: $job_id
+            repo: "test/race"
+            issue_number: 10
+            title: "Race test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "PARTIAL"
+            failure_signature: null
+            duration_seconds: 100
+            exit_code: 130
+            local_branch: "mimo/race"
+            local_sha: "abc123"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "abc123"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 3
+            tool_calls: 5
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "main"
+            generation: 0
+        }
+        flight-write-result $job_id $stale_main_result
+        let closeout_started_job = {
+            job_id: $job_id
+            job_dir: $job_dir
+            jobspec: $jobspec
+            resource_key: "test/race:mimo/race"
+            original_title: "Race test"
+            admission: {ok: true, packet: "test"}
+            started_at: ((date now) - 1200sec)
+            soft_deadline_ns: 960000000000
+            hard_deadline_ns: 1200000000000
+            closeout_started: true
+            child_job: null
+            child_tag: (worker-mailbox-tag)
+        }
+        let read_back = (flight-read-result $job_id)
+        assert (not (controller-result-authoritative $read_back $closeout_started_job.closeout_started)) "stale main result is NOT authoritative after closeout starts"
+        flight-append-event $job_id {event: "main_result_superseded", phase: "main", generation: 0, category: "PARTIAL", reason: "closeout_started; main result is historical evidence only"}
+        let closeout_result = {
+            job_id: $job_id
+            repo: "test/race"
+            issue_number: 10
+            title: "Race test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "DONE"
+            failure_signature: null
+            duration_seconds: 50
+            exit_code: 0
+            local_branch: "mimo/race"
+            local_sha: "def456"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "def456"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 5
+            tool_calls: 8
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: true
+            closeout_duration_seconds: 50
+            phase: "closeout"
+            generation: 1
+        }
+        flight-write-result $job_id $closeout_result
+        let final_result = (flight-read-result $job_id)
+        assert (controller-result-authoritative $final_result $closeout_started_job.closeout_started) "closeout result IS authoritative after closeout starts"
+        controller-finalize-job $closeout_started_job $final_result
+        let events = (flight-read-events $job_id)
+        assert ($events | any {|e| $e.event == "main_result_superseded"}) "superseded event recorded"
+        assert ($events | any {|e| $e.event == "finalized"}) "finalized event recorded"
+        let finalized_event = ($events | where {|e| $e.event == "finalized"} | first)
+        assert-equal $finalized_event.category "DONE" "finalized with closeout result, not stale main result"
+    })
+    (test "closeout race: main result with exit 130 never steals finalization" {
+        let job_id = "race-exit130-001"
+        let jobspec = {job_id: $job_id, repo: "test/exit130", issue_number: 11, title: "Exit 130 test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/exit130", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 25, description: null}
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/exit130", resource_key: "test/exit130:mimo/exit130"}
+        let exit130_result = {
+            job_id: $job_id
+            repo: "test/exit130"
+            issue_number: 11
+            title: "Exit 130 test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 25
+            description: null
+            category: "PARTIAL"
+            failure_signature: null
+            duration_seconds: 1200
+            exit_code: 130
+            local_branch: "mimo/exit130"
+            local_sha: "abc123"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "abc123"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 3
+            tool_calls: 5
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "main"
+            generation: 0
+        }
+        flight-write-result $job_id $exit130_result
+        let job_record = {
+            job_id: $job_id
+            job_dir: ($test_root | path join $"watch-($job_id)")
+            jobspec: $jobspec
+            resource_key: "test/exit130:mimo/exit130"
+            original_title: "Exit 130 test"
+            admission: {ok: true, packet: "test"}
+            started_at: ((date now) - 1200sec)
+            soft_deadline_ns: 1200000000000
+            hard_deadline_ns: 1500000000000
+            closeout_started: true
+            child_job: null
+            child_tag: (worker-mailbox-tag)
+        }
+        let read_result = (flight-read-result $job_id)
+        assert (not (controller-result-authoritative $read_result $job_record.closeout_started)) "exit 130 main result rejected after closeout"
+        assert-equal $read_result.exit_code 130 "exit code preserved as evidence"
+        assert-equal $read_result.category "PARTIAL" "category preserved as evidence"
+    })
+    (test "closeout race: hard deadline writes TIMED_OUT when stale main result exists but closeout started" {
+        let job_id = "race-hard-001"
+        let jobspec = {job_id: $job_id, repo: "test/hard", issue_number: 12, title: "Hard deadline test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/hard", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/hard", resource_key: "test/hard:mimo/hard"}
+        let stale_result = {
+            job_id: $job_id
+            repo: "test/hard"
+            issue_number: 12
+            title: "Hard deadline test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "PARTIAL"
+            failure_signature: null
+            duration_seconds: 100
+            exit_code: 130
+            local_branch: "mimo/hard"
+            local_sha: "abc123"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "abc123"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 2
+            tool_calls: 3
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "main"
+            generation: 0
+        }
+        flight-write-result $job_id $stale_result
+        let existing = (flight-read-result $job_id)
+        let closeout_started = true
+        assert (not (controller-result-authoritative $existing $closeout_started)) "stale main result not authoritative"
+    })
+    (test "pre-soft normal result with phase main finalizes normally" {
+        let job_id = "pre-soft-001"
+        let jobspec = {job_id: $job_id, repo: "test/pre-soft", issue_number: 13, title: "Pre-soft test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/pre-soft", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/pre-soft", resource_key: "test/pre-soft:mimo/pre-soft"}
+        let normal_result = {
+            job_id: $job_id
+            repo: "test/pre-soft"
+            issue_number: 13
+            title: "Pre-soft test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "DONE"
+            failure_signature: null
+            duration_seconds: 100
+            exit_code: 0
+            local_branch: "mimo/pre-soft"
+            local_sha: "abc123"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "abc123"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 3
+            tool_calls: 5
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "main"
+            generation: 0
+        }
+        flight-write-result $job_id $normal_result
+        let job_record = {
+            job_id: $job_id
+            job_dir: ($test_root | path join $"watch-($job_id)")
+            jobspec: $jobspec
+            resource_key: "test/pre-soft:mimo/pre-soft"
+            original_title: "Pre-soft test"
+            admission: {ok: true, packet: "test"}
+            started_at: ((date now) - 100sec)
+            soft_deadline_ns: 960000000000
+            hard_deadline_ns: 1200000000000
+            closeout_started: false
+            child_job: null
+            child_tag: (worker-mailbox-tag)
+        }
+        let read_result = (flight-read-result $job_id)
+        assert (controller-result-authoritative $read_result $job_record.closeout_started) "pre-soft main result IS authoritative"
+        controller-finalize-job $job_record $read_result
+        let events = (flight-read-events $job_id)
+        let finalized = ($events | where {|e| $e.event == "finalized"})
+        assert-equal ($finalized | length) 1 "finalized exactly once"
+        assert-equal ($finalized | first).category "DONE" "finalized as DONE"
+    })
+    (test "flight recorder preserves superseded main result as evidence" {
+        let job_id = "evidence-001"
+        let stale_result = {
+            job_id: $job_id
+            repo: "test/evidence"
+            issue_number: 14
+            title: "Evidence test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "PARTIAL"
+            failure_signature: null
+            duration_seconds: 100
+            exit_code: 130
+            local_branch: "mimo/evidence"
+            local_sha: "abc123"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "abc123"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 2
+            tool_calls: 3
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "main"
+            generation: 0
+        }
+        flight-write-result $job_id $stale_result
+        flight-append-event $job_id {event: "main_result_superseded", phase: "main", generation: 0, category: "PARTIAL", reason: "closeout_started; main result is historical evidence only"}
+        let closeout_result = {
+            job_id: $job_id
+            repo: "test/evidence"
+            issue_number: 14
+            title: "Evidence test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "DONE"
+            failure_signature: null
+            duration_seconds: 50
+            exit_code: 0
+            local_branch: "mimo/evidence"
+            local_sha: "def456"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "def456"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 5
+            tool_calls: 8
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: true
+            closeout_duration_seconds: 50
+            phase: "closeout"
+            generation: 1
+        }
+        flight-write-result $job_id $closeout_result
+        let events = (flight-read-events $job_id)
+        assert ($events | any {|e| $e.event == "main_result_superseded"}) "superseded event preserved"
+        let superseded = ($events | where {|e| $e.event == "main_result_superseded"} | first)
+        assert-equal $superseded.category "PARTIAL" "superseded event records original category"
+        assert-equal $superseded.phase "main" "superseded event records main phase"
+        assert-equal $superseded.generation 0 "superseded event records generation 0"
+        let final_result = (flight-read-result $job_id)
+        assert-equal $final_result.category "DONE" "canonical result is closeout DONE"
+        assert-equal ($final_result.phase? | default "MISSING") "closeout" "canonical phase is closeout"
+    })
+    (test "closeout exception result has phase closeout and generation 1" {
+        let job_id = "closeout-phase-001"
+        let result_record = {
+            job_id: $job_id
+            repo: "test/closeout-phase"
+            issue_number: 15
+            title: "Closeout phase test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "INTERNAL_ERROR"
+            failure_signature: "closeout_exception"
+            duration_seconds: 0
+            exit_code: 1
+            timed_out: false
+            local_branch: ""
+            local_sha: ""
+            worktree_clean: false
+            remote_exists: false
+            remote_sha: ""
+            sha_match: false
+            branch_match: false
+            changed_file_count: 0
+            tool_calls: 0
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: true
+            phase: "closeout"
+            generation: 1
+        }
+        flight-write-result $job_id $result_record
+        let read_back = (flight-read-result $job_id)
+        assert-equal ($read_back.phase? | default "MISSING") "closeout" "closeout exception has closeout phase"
+        assert-equal ($read_back.generation? | default (-1)) 1 "closeout exception has generation 1"
+        assert (controller-result-authoritative $read_back true) "closeout exception is authoritative"
+    })
+    (test "hard deadline result has phase closeout and generation 1" {
+        let job_id = "hard-phase-001"
+        let result_record = {
+            job_id: $job_id
+            repo: "test/hard-phase"
+            issue_number: 16
+            title: "Hard phase test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "TIMED_OUT"
+            failure_signature: "watchdog_timeout"
+            duration_seconds: 1200
+            exit_code: 124
+            timed_out: true
+            local_branch: ""
+            local_sha: ""
+            worktree_clean: false
+            remote_exists: false
+            remote_sha: ""
+            sha_match: false
+            branch_match: false
+            changed_file_count: 0
+            tool_calls: 0
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "closeout"
+            generation: 1
+        }
+        flight-write-result $job_id $result_record
+        let read_back = (flight-read-result $job_id)
+        assert-equal ($read_back.phase? | default "MISSING") "closeout" "hard deadline has closeout phase"
+        assert-equal ($read_back.generation? | default (-1)) 1 "hard deadline has generation 1"
+    })
+    (test "closeout never returns: hard deadline produces proper timeout" {
+        let job_id = "no-closeout-001"
+        let jobspec = {job_id: $job_id, repo: "test/no-closeout", issue_number: 17, title: "No closeout test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/no-closeout", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/no-closeout", resource_key: "test/no-closeout:mimo/no-closeout"}
+        let stale_result = {
+            job_id: $job_id
+            repo: "test/no-closeout"
+            issue_number: 17
+            title: "No closeout test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+            category: "PARTIAL"
+            failure_signature: null
+            duration_seconds: 100
+            exit_code: 130
+            local_branch: "mimo/no-closeout"
+            local_sha: "abc123"
+            worktree_clean: true
+            remote_exists: true
+            remote_sha: "abc123"
+            sha_match: true
+            branch_match: true
+            changed_file_count: 2
+            tool_calls: 3
+            tool_failures: 0
+            completed_at: (iso-now-utc)
+            closeout_ran: false
+            phase: "main"
+            generation: 0
+        }
+        flight-write-result $job_id $stale_result
+        let existing = (flight-read-result $job_id)
+        assert (not (controller-result-authoritative $existing true)) "stale main not authoritative"
+    })
+    (test "all existing result records have phase and generation fields after fix" {
+        let fake_repo = ($test_root | path join "schema-check-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "schema-check-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let test_result = {status: "completed", exit_code: 0, tool_calls: 1, tool_failures: 0, changed_files: [], duration_seconds: 1, timed_out: false, final_text: "done", model: "mimo-v2.5", backend: "opencode", provider: "m2c-mimo", session_id: null, workstream: null, packet: null, budget_minutes: 20, context_estimate_tokens: null, context_percent: null, checkpoint_recommended: false, agent: "build"}
+        let backend_file = ($test_root | path join "schema-check-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        let job_id = "schema-check-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let job_spec = {job_id: $job_id, repo: "local/schema", issue_number: 1, title: "Schema check", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/schema", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let _result = (controller-runner $job_dir $job_spec "Schema check work.")
+        }
+        let written = (flight-read-result $job_id)
+        assert ($written != null) "result written"
+        assert ($written | columns | any {|c| $c == "phase"}) "phase column present"
+        assert ($written | columns | any {|c| $c == "generation"}) "generation column present"
     })
 ]
 
