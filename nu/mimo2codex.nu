@@ -1581,9 +1581,13 @@ def controller-closeout-runner [clone_dir: path job: record closeout_budget_minu
 }
 
 def controller-finalize-job [job_record: record result_record: record] {
+    let existing_events = (try { flight-read-events $job_record.job_id } catch { [] })
+    if ($existing_events | any {|event| $event.event? == "finalized"}) { return }
     let final_status = $result_record.category
     let final_title = $"[M2C ($final_status)] ($job_record.original_title)"
-    watch-update-title $job_record.jobspec.repo $job_record.jobspec.issue_number $final_title
+    try { watch-update-title $job_record.jobspec.repo $job_record.jobspec.issue_number $final_title } catch {|err|
+        try { flight-append-event $job_record.job_id {event: "finalize_warning", operation: "title", error: ($err.msg? | default "title update failed")} } catch { }
+    }
     let summary_status = (if ($result_record.timed_out? | default false) { "timed_out" } else if ($result_record.cancelled? | default false) { "cancelled" } else if ($result_record.exit_code == 0) { "completed" } else { "failed" })
     let summary = {
         status: $summary_status
@@ -1599,8 +1603,21 @@ def controller-finalize-job [job_record: record result_record: record] {
         branch_match: ($result_record.branch_match? | default false)
     }
     let comment = (watch-build-result-comment $summary $delivery $job_record.jobspec.profile $final_status $job_record.jobspec.budget_minutes)
-    watch-add-comment $job_record.jobspec.repo $job_record.jobspec.issue_number $comment
-    flight-append-event $job_record.job_id {event: "finalized", category: $final_status, failure_signature: ($result_record.failure_signature? | default null)}
+    try { watch-add-comment $job_record.jobspec.repo $job_record.jobspec.issue_number $comment } catch {|err|
+        try { flight-append-event $job_record.job_id {event: "finalize_warning", operation: "comment", error: ($err.msg? | default "comment failed")} } catch { }
+    }
+    try { flight-append-event $job_record.job_id {event: "finalized", category: $final_status, failure_signature: ($result_record.failure_signature? | default null)} } catch { }
+}
+
+def controller-raise-watch-error [err: any] {
+    let err_msg = ($err.msg? | default "watch error")
+    let span = ($err.span? | default null)
+    let has_record_span = (try { ($span | describe) == "record" } catch { false })
+    if $has_record_span {
+        error make {msg: $err_msg, label: {text: "watch controller error", span: $span}}
+    } else {
+        error make {msg: $err_msg}
+    }
 }
 
 def watch-run-worker-in-job [job_dir: path job: record] {
@@ -1893,7 +1910,8 @@ def watch-command [args: list<string>] {
                 let result_exists = ($result_path | path exists)
                 let elapsed_ns = (((date now) - $job_record.started_at) | into int)
                 let child_msg = (try { job recv --tag $job_record.child_tag --timeout 0sec } catch { null })
-                if $result_exists and ($child_msg != null) {
+                let child_alive = (try { (job list | any {|child| $child.id == $job_record.child_job}) } catch { true })
+                if $result_exists {
                     let result_record = (flight-read-result $job_record.job_id)
                     if ($result_record != null) {
                         controller-finalize-job $job_record $result_record
@@ -1919,7 +1937,7 @@ def watch-command [args: list<string>] {
                         }
                         $completed_indices = ($completed_indices | append $idx)
                     }
-                } else if (not $result_exists) and ($child_msg != null) {
+                } else if (not $result_exists) and (($child_msg != null) or (not $child_alive)) {
                     let result_record = {
                         job_id: $job_record.job_id
                         repo: $job_record.jobspec.repo
@@ -1948,7 +1966,7 @@ def watch-command [args: list<string>] {
                         completed_at: (iso-now-utc)
                         closeout_ran: false
                     }
-                    flight-append-event $job_record.job_id {event: "runner_disappeared", reason: "child sent terminal message but no result.json"}
+                    flight-append-event $job_record.job_id {event: "runner_disappeared", reason: (if $child_msg != null { "child sent terminal message but no result.json" } else { "child job exited without terminal message or result.json" })}
                     flight-write-result $job_record.job_id $result_record
                     controller-finalize-job $job_record $result_record
                     let err_receipt = $"INTERNAL_ERROR · ($job_record.original_title) · ($job_record.jobspec.repo) · runner_disappeared"
@@ -2095,7 +2113,7 @@ def watch-command [args: list<string>] {
         if ($err_detail | is-not-empty) {
             print --stderr $"Error context: ($err_detail)"
         }
-        error make {msg: $err_msg, label: {text: "watch controller error", span: ($err.span? | default null)}}
+        controller-raise-watch-error $err
     }
     if $tty_on { live-clear-panel $panel_lines }
     controller-release-lock

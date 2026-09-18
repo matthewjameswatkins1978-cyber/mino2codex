@@ -2236,6 +2236,20 @@ let results = [
         assert ($err_msg | str contains "exit code 128") "error includes exit code"
         assert (not ($err_msg == "External command failed")) "not just wrapper message"
     })
+    (test "watch error rethrow accepts a missing span without masking the original error" {
+        let caught = (try {
+            controller-raise-watch-error {msg: "External command failed while starting runner", span: null}
+        } catch {|err| $err })
+        assert ($caught != null) "watch error was rethrown"
+        assert-equal $caught.msg "External command failed while starting runner" "original message preserved"
+    })
+    (test "watch error rethrow preserves a valid span record" {
+        let caught = (try {
+            controller-raise-watch-error {msg: "runner detail", span: {start: 10, end: 12, source: "watch.nu"}}
+        } catch {|err| $err })
+        assert ($caught != null) "structured watch error was rethrown"
+        assert-equal $caught.msg "runner detail" "structured error message preserved"
+    })
     (test "closeout exception writes INTERNAL_ERROR with closeout_ran true" {
         let job_id = "closeout-except-001"
         let jobspec = {
