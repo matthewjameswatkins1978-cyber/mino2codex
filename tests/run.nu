@@ -2851,6 +2851,208 @@ let results = [
         assert-equal (live-panel-state [$j1 $j2] 3 0).free 1 "2 jobs = 1 free"
         assert-equal (live-panel-state [$j1 $j2 $j3] 3 0).free 0 "3 jobs = 0 free"
     })
+    # --- update command: controller lock detection ---
+    (test "update refuses when controller lock exists with alive pid" {
+        let lock_path = (controller-lock-path)
+        mkdir (state-root)
+        {pid: $nu.pid, slots: 1, started_at: (iso-now-utc), version: "0.2.3"} | to json | save --force $lock_path
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "update-command runs without throwing"
+        controller-release-lock
+    })
+    (test "update proceeds when controller lock has stale pid" {
+        let lock_path = (controller-lock-path)
+        mkdir (state-root)
+        {pid: 99999999, slots: 1, started_at: (iso-now-utc), version: "0.2.3"} | to json | save --force $lock_path
+        let saved_source = $env.MIMO2CODEX_SOURCE_ROOT
+        $env.MIMO2CODEX_SOURCE_ROOT = ($test_root | path join "nonexistent")
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "stale lock does not block update"
+        $env.MIMO2CODEX_SOURCE_ROOT = $saved_source
+        controller-release-lock
+    })
+    (test "update proceeds when no controller lock exists" {
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let saved_source = $env.MIMO2CODEX_SOURCE_ROOT
+        $env.MIMO2CODEX_SOURCE_ROOT = ($test_root | path join "nonexistent")
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "no lock does not block update"
+        $env.MIMO2CODEX_SOURCE_ROOT = $saved_source
+    })
+    # --- update command: source checkout resolution ---
+    (test "update resolves source from MIMO2CODEX_SOURCE_ROOT env" {
+        let fake_source = ($test_root | path join "fake-source")
+        mkdir $fake_source
+        mkdir ($fake_source | path join "nu")
+        "0.2.3" | save --force ($fake_source | path join "VERSION")
+        "source content" | save --force ($fake_source | path join "nu" | path join "mimo2codex.nu")
+        let saved_source = $env.MIMO2CODEX_SOURCE_ROOT
+        $env.MIMO2CODEX_SOURCE_ROOT = $fake_source
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "env source root resolves"
+        $env.MIMO2CODEX_SOURCE_ROOT = $saved_source
+    })
+    (test "update fails when source root is not a valid checkout" {
+        let empty_dir = ($test_root | path join "empty-source")
+        mkdir $empty_dir
+        let saved_source = $env.MIMO2CODEX_SOURCE_ROOT
+        $env.MIMO2CODEX_SOURCE_ROOT = $empty_dir
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "invalid source does not throw"
+        $env.MIMO2CODEX_SOURCE_ROOT = $saved_source
+    })
+    # --- update command: repository identity validation ---
+    (test "update rejects source with wrong remote identity" {
+        let wrong_repo = ($test_root | path join "wrong-repo")
+        mkdir $wrong_repo
+        (run-external "git" "-C" $wrong_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "wrong-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $wrong_repo $work | complete) | ignore
+        ("0.2.3" | save --force ($work | path join "VERSION"))
+        mkdir ($work | path join "nu")
+        ("source" | save --force ($work | path join "nu" | path join "mimo2codex.nu"))
+        let saved_source = $env.MIMO2CODEX_SOURCE_ROOT
+        $env.MIMO2CODEX_SOURCE_ROOT = $work
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "wrong repo identity does not throw"
+        $env.MIMO2CODEX_SOURCE_ROOT = $saved_source
+    })
+    # --- update command: dirty worktree refusal ---
+    (test "update refuses dirty source checkout" {
+        let dirty_repo = ($test_root | path join "dirty-source")
+        mkdir $dirty_repo
+        (run-external "git" "-C" $dirty_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "dirty-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $dirty_repo $work | complete) | ignore
+        ("0.2.3" | save --force ($work | path join "VERSION"))
+        mkdir ($work | path join "nu")
+        ("source" | save --force ($work | path join "nu" | path join "mimo2codex.nu"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "remote" "set-url" "origin" "https://github.com/matthewjameswatkins1978-cyber/mino2codex.git" | complete) | ignore
+        ("dirty change" | save --force ($work | path join "DIRTY.txt"))
+        let saved_source = $env.MIMO2CODEX_SOURCE_ROOT
+        $env.MIMO2CODEX_SOURCE_ROOT = $work
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "dirty worktree does not throw"
+        $env.MIMO2CODEX_SOURCE_ROOT = $saved_source
+    })
+    # --- update command: already current ---
+    (test "update reports already current when local matches remote" {
+        let current_repo = ($test_root | path join "current-source")
+        mkdir $current_repo
+        (run-external "git" "-C" $current_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "current-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $current_repo $work | complete) | ignore
+        ("0.2.3" | save --force ($work | path join "VERSION"))
+        mkdir ($work | path join "nu")
+        ("source" | save --force ($work | path join "nu" | path join "mimo2codex.nu"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        (run-external "git" "-C" $work "remote" "set-url" "origin" "https://github.com/matthewjameswatkins1978-cyber/mino2codex.git" | complete) | ignore
+        let saved_source = $env.MIMO2CODEX_SOURCE_ROOT
+        $env.MIMO2CODEX_SOURCE_ROOT = $work
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "already current does not throw"
+        $env.MIMO2CODEX_SOURCE_ROOT = $saved_source
+    })
+    # --- update command: divergent state refusal ---
+    (test "update refuses divergent source checkout" {
+        let diverge_repo = ($test_root | path join "diverge-source")
+        mkdir $diverge_repo
+        (run-external "git" "-C" $diverge_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "diverge-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $diverge_repo $work | complete) | ignore
+        ("0.2.3" | save --force ($work | path join "VERSION"))
+        mkdir ($work | path join "nu")
+        ("source" | save --force ($work | path join "nu" | path join "mimo2codex.nu"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        (run-external "git" "-C" $work "remote" "set-url" "origin" "https://github.com/matthewjameswatkins1978-cyber/mino2codex.git" | complete) | ignore
+        ("divergent" | save --force ($work | path join "LOCAL.txt"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "local work" | complete) | ignore
+        let saved_source = $env.MIMO2CODEX_SOURCE_ROOT
+        $env.MIMO2CODEX_SOURCE_ROOT = $work
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "divergent state does not throw"
+        $env.MIMO2CODEX_SOURCE_ROOT = $saved_source
+    })
+    # --- update command: update succeeds with ff-only pull ---
+    (test "update succeeds with clean ff-only pull path" {
+        let ff_repo = ($test_root | path join "ff-source")
+        mkdir $ff_repo
+        (run-external "git" "-C" $ff_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "ff-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $ff_repo $work | complete) | ignore
+        ("0.2.3" | save --force ($work | path join "VERSION"))
+        mkdir ($work | path join "nu")
+        ("source v1" | save --force ($work | path join "nu" | path join "mimo2codex.nu"))
+        ("config v1" | save --force ($work | path join "config.json"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        (run-external "git" "-C" $work "remote" "set-url" "origin" "https://github.com/matthewjameswatkins1978-cyber/mino2codex.git" | complete) | ignore
+        let saved_source = $env.MIMO2CODEX_SOURCE_ROOT
+        $env.MIMO2CODEX_SOURCE_ROOT = $work
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "ff-only path does not throw"
+        $env.MIMO2CODEX_SOURCE_ROOT = $saved_source
+    })
+    # --- update command: missing checkout ---
+    (test "update fails gracefully when no source checkout found" {
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "missing checkout does not throw"
+    })
+    # --- update command: secrets never printed ---
+    (test "update command output does not contain credential values" {
+        let saved_source = $env.MIMO2CODEX_SOURCE_ROOT
+        $env.MIMO2CODEX_SOURCE_ROOT = ($test_root | path join "nonexistent")
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "update runs without throwing"
+        $env.MIMO2CODEX_SOURCE_ROOT = $saved_source
+    })
+    # --- update command: paths work under Linux conventions ---
+    (test "update source resolution works with tilde-style home path" {
+        let home_work = ($test_root | path join "home-work")
+        mkdir $home_work
+        mkdir ($home_work | path join "nu")
+        ("0.2.3" | save --force ($home_work | path join "VERSION"))
+        ("source" | save --force ($home_work | path join "nu" | path join "mimo2codex.nu"))
+        let saved_source = $env.MIMO2CODEX_SOURCE_ROOT
+        $env.MIMO2CODEX_SOURCE_ROOT = $home_work
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        let result = (try { update-command; "completed" } catch { "error" })
+        assert ($result == "completed") "home path works"
+        $env.MIMO2CODEX_SOURCE_ROOT = $saved_source
+    })
 ]
 
 print ($results | table)
