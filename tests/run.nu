@@ -14,6 +14,13 @@ def test [name: string action: closure] {
 }
 
 let results = [
+    (test "autoload refreshes installed implementation on each invocation" {
+        let autoload = ($project_root | path join "nu" | path join "autoload-m2c.nu")
+        let raw = (open --raw $autoload)
+        assert (not ($raw | str starts-with "source ")) "autoload does not bind a stale implementation at session startup"
+        assert ($raw | str contains 'source ($nu.data-dir | path join "mimo2codex" | path join "mimo2codex.nu")') "wrapper sources installed implementation"
+        assert ($raw | str contains "    invoke ...$args") "wrapper invokes freshly sourced implementation"
+    })
     (test "JSON parsing and single authority" {
         let data = (open ($project_root | path join "config" | path join "mimo.json"))
         assert-equal $data.provider.env_key "MIMO_API_KEY" "env key"
