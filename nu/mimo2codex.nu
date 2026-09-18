@@ -1032,6 +1032,7 @@ def print-help [] {
     print "  m2c watch --once             backward-compatible alias for --check"
     print "  m2c key replace             replace the locally stored credential"
     print "  m2c key remove              remove the locally stored credential"
+    print "  m2c update                  update m2c from the canonical source checkout"
     print "  m2c uninstall               remove the installed command, state and m2c skill"
     print "  m2c version                 show the installed version"
     print "  m2c help                    show this help"
@@ -2360,9 +2361,112 @@ def uninstall [] {
 
 export def version [] { print (version-value) }
 
+def update-command [] {
+    let lock_path = (controller-lock-path)
+    if ($lock_path | path exists) {
+        let lock_data = (try { open --raw $lock_path | from json } catch { null })
+        if ($lock_data != null) {
+            let pid = ($lock_data.pid? | default 0)
+            let alive = (if $nu.os-info.family == "unix" {
+                let probe = (do { run-external "kill" "-0" ($pid | into string) } | complete)
+                $probe.exit_code == 0
+            } else {
+                let probe = (do { run-external "tasklist" "/FI" $"PID eq ($pid)" } | complete)
+                ($probe.exit_code == 0) and ($probe.stdout | str contains ($pid | into string))
+            })
+            if $alive {
+                print "m2c watcher is active."
+                print "Stop the watcher before updating."
+                print "No files were changed."
+                return
+            }
+        }
+    }
+    let current_installed = (try { open ($nu.data-dir | path join "mimo2codex" | path join "VERSION") | str trim } catch { "unknown" })
+    let env_source = (if ($env.MIMO2CODEX_SOURCE_ROOT? | is-not-empty) { $env.MIMO2CODEX_SOURCE_ROOT | path expand } else { "" })
+    let source_root = (
+        if ($env_source != "") and (($env_source | path join "VERSION" | path exists) and (($env_source | path join "nu" | path join "mimo2codex.nu") | path exists)) { $env_source }
+        else if ((($env.PWD? | default "") | path join "VERSION" | path exists) and ((($env.PWD? | default "") | path join "nu" | path join "mimo2codex.nu") | path exists)) { $env.PWD | path expand }
+        else if (($nu.home-dir | path join "mino2codex" | path join "VERSION" | path exists) and (($nu.home-dir | path join "mino2codex" | path join "nu" | path join "mimo2codex.nu") | path exists)) { $nu.home-dir | path join "mino2codex" }
+        else { "" }
+    )
+    if ($source_root == "") {
+        print "No m2c source checkout found."
+        print "Clone the canonical repository:"
+        print "  git clone https://github.com/matthewjameswatkins1978-cyber/mino2codex.git ~/mino2codex"
+        print "Then run: m2c update"
+        return
+    }
+    let remote_url = (try { (run-external "git" "-C" $source_root "remote" "get-url" "origin" | complete).stdout | str trim | str lowercase } catch { "" })
+    if not ($remote_url | str contains "mino2codex") {
+        print "Source checkout is not the m2c repository."
+        print $"  path: ($source_root)"
+        print $"  remote: ($remote_url)"
+        print "No files were changed."
+        return
+    }
+    let status_raw = (try { (run-external "git" "-C" $source_root "status" "--porcelain" | complete).stdout | str trim } catch { "" })
+    if not ($status_raw | is-empty) {
+        print "Source checkout is dirty."
+        print "Commit or stash local changes before updating."
+        print $"  path: ($source_root)"
+        print "No files were changed."
+        return
+    }
+    let fetch = (do { run-external "git" "-C" $source_root "fetch" "origin" "main" } | complete)
+    if $fetch.exit_code != 0 {
+        print "git fetch failed."
+        print "No files were changed."
+        return
+    }
+    let local_head = (try { (run-external "git" "-C" $source_root "rev-parse" "HEAD" | complete).stdout | str trim } catch { "" })
+    let remote_head = (try { (run-external "git" "-C" $source_root "rev-parse" "origin/main" | complete).stdout | str trim } catch { "" })
+    let upstream_version = (try { (run-external "git" "-C" $source_root "show" $"origin/main:VERSION" | complete).stdout | str trim } catch { "unknown" })
+    if $local_head == $remote_head {
+        print $"m2c ($current_installed) is already current."
+        return
+    }
+    let ff_check = (do { run-external "git" "-C" $source_root "merge-base" "--is-ancestor" "HEAD" "origin/main" } | complete)
+    if $ff_check.exit_code != 0 {
+        print "Source has diverged from origin/main."
+        print "Resolve manually before updating."
+        print $"  path: ($source_root)"
+        print "No files were changed."
+        return
+    }
+    let pull = (do { run-external "git" "-C" $source_root "pull" "--ff-only" "origin" "main" } | complete)
+    if $pull.exit_code != 0 {
+        print "git pull --ff-only failed."
+        print "No files were changed."
+        return
+    }
+    let install = (do { run-external $nu.current-exe $"($source_root | path join 'install.nu')" } | complete)
+    if $install.exit_code != 0 {
+        print "Installer failed."
+        print $"  exit: ($install.exit_code)"
+        if ($install.stderr | is-not-empty) { print $install.stderr }
+        return
+    }
+    let installed_after = (try { open ($nu.data-dir | path join "mimo2codex" | path join "VERSION") | str trim } catch { "unknown" })
+    if $installed_after != $upstream_version {
+        print "Installed version does not match source."
+        print $"  expected: ($upstream_version)"
+        print $"  installed: ($installed_after)"
+        print "No files were changed."
+        return
+    }
+    print $"source   ($source_root)"
+    print $"current  ($current_installed)"
+    print $"latest   ($upstream_version)"
+    print $"install  ok"
+    print $"verified ($installed_after)"
+    print ""
+    print "Restart with: m2c watch --stay"
+}
+
 export def invoke [...args: string] {
     let command = ($args | first | default "")
-    if $command in ["help", "--help", "-h"] { print-help } else if $command == "version" { version } else if $command == "models" { model-records | table } else if $command == "setup" { setup } else if $command == "doctor" { doctor ($args | skip 1) } else if $command == "key" { key-command ($args | skip 1) } else if $command == "checkpoint" { checkpoint-command ($args | skip 1) } else if $command == "watch" { watch-command ($args | skip 1) } else if $command == "status" { status-command } else if $command == "queue" { queue-command } else if $command == "stats" { stats-command ($args | skip 1) } else if $command == "failures" { failures-command } else if $command == "inspect" { inspect-command ($args | skip 1) } else if $command == "uninstall" { uninstall } else if $command == "codex" {
+    if $command in ["help", "--help", "-h"] { print-help } else if $command == "version" { version } else if $command == "update" { update-command } else if $command == "models" { model-records | table } else if $command == "setup" { setup } else if $command == "doctor" { doctor ($args | skip 1) } else if $command == "key" { key-command ($args | skip 1) } else if $command == "checkpoint" { checkpoint-command ($args | skip 1) } else if $command == "watch" { watch-command ($args | skip 1) } else if $command == "status" { status-command } else if $command == "queue" { queue-command } else if $command == "stats" { stats-command ($args | skip 1) } else if $command == "failures" { failures-command } else if $command == "inspect" { inspect-command ($args | skip 1) } else if $command == "uninstall" { uninstall } else if $command == "codex" {
         let rest = ($args | skip 1)
         let selected = ($rest | first | default "pro")
         if $selected == "standard" { launch-codex (provider-data).models.standard ($rest | skip 1) } else if $selected == "pro" { launch-codex (provider-data).models.pro ($rest | skip 1) } else { launch-codex (provider-data).models.pro $rest }
