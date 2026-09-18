@@ -812,10 +812,17 @@ let results = [
         assert $result.ok "null budget is ok"
         assert-equal $result.budget 20 "default budget is 20"
     })
-    (test "budget_minutes defaults to 20 when empty string" {
+    (test "budget_minutes rejects empty string" {
         let result = (watch-parse-budget "")
-        assert $result.ok "empty budget is ok"
-        assert-equal $result.budget 20 "default budget is 20"
+        assert (not $result.ok) "empty budget is rejected"
+        assert ($result.reason | str contains "integer") "reason mentions integer"
+    })
+    (test "blank budget_minutes frontmatter fails closed" {
+        let body = $"---\nm2c_job: 1\nbase: abcdef0123456789abcdef0123456789abcdef02\nbranch: feature/test\nmodel: standard\nbudget_minutes:\n---\npacket"
+        let fm = (watch-gh-parse-front-matter $body)
+        let result = (watch-validate-packet $fm)
+        assert (not $result.ok) "blank budget is rejected"
+        assert ($result.reason | str contains "integer") "reason mentions integer"
     })
     (test "budget_minutes accepts minimum 5" {
         let result = (watch-parse-budget "5")
