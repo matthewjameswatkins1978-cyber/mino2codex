@@ -1864,6 +1864,450 @@ let results = [
         assert-equal $read_a.repo "a/repo" "job a isolated"
         assert-equal $read_b.repo "b/repo" "job b isolated"
     })
+    # --- child runner exception hardening ---
+    (test "child runner exception writes INTERNAL_ERROR result.json" {
+        let job_id = "child-except-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let fake_repo = ($test_root | path join "child-except-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "child-except-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let jobspec = {
+            job_id: $job_id
+            repo: "test/repo"
+            issue_number: 1
+            title: "Exception test"
+            base_sha: $base_sha
+            branch: "mimo/test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/repo", resource_key: "test/repo:mimo/test"}
+        flight-append-event $job_id {event: "runner_start"}
+        let child_tag = (worker-mailbox-tag)
+        let backend_file = ($test_root | path join "nonexistent-backend.json")
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let child_job = (job spawn --description "test child exception" {
+                try {
+                    let _r = (controller-runner $job_dir $jobspec "test")
+                } catch {|err|
+                    let err_msg = (redact-secrets ($err.msg? | default "runner exception"))
+                    let _result_path = (flight-job-dir $job_id | path join "result.json")
+                    flight-append-event $job_id {event: "runner_exception", error: $err_msg}
+                    if not ($_result_path | path exists) {
+                        let result_record = {
+                            job_id: $job_id
+                            repo: $jobspec.repo
+                            issue_number: $jobspec.issue_number
+                            title: "Exception test"
+                            worker: $jobspec.worker
+                            profile: $jobspec.profile
+                            mode: $jobspec.mode
+                            budget_minutes: $jobspec.budget_minutes
+                            description: $jobspec.description
+                            category: "INTERNAL_ERROR"
+                            failure_signature: "runner_exception"
+                            duration_seconds: 0
+                            exit_code: 1
+                            timed_out: false
+                            local_branch: ""
+                            local_sha: ""
+                            worktree_clean: false
+                            remote_exists: false
+                            remote_sha: ""
+                            sha_match: false
+                            branch_match: false
+                            changed_file_count: 0
+                            tool_calls: 0
+                            tool_failures: 0
+                            completed_at: (iso-now-utc)
+                            closeout_ran: false
+                        }
+                        flight-write-result $job_id $result_record
+                    }
+                }
+                {done: true} | job send 0 --tag $child_tag
+            })
+            let msg = (try { job recv --tag $child_tag --timeout 30sec } catch { null })
+            assert ($msg != null) "child sent terminal message despite exception"
+        }
+        let result = (flight-read-result $job_id)
+        assert ($result != null) "result.json written after child exception"
+        assert-equal $result.category "INTERNAL_ERROR" "category is INTERNAL_ERROR"
+        assert-equal $result.failure_signature "runner_exception" "failure signature is runner_exception"
+        let events = (flight-read-events $job_id)
+        assert ($events | any {|e| $e.event == "runner_exception"}) "runner_exception event recorded"
+    })
+    (test "controller reaping detects child terminal message without result.json" {
+        let job_id = "reap-no-result-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let jobspec = {
+            job_id: $job_id
+            repo: "test/repo"
+            issue_number: 2
+            title: "Reap test"
+            base_sha: "abcdef0123456789abcdef0123456789abcdef02"
+            branch: "mimo/test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/repo", resource_key: "test/repo:mimo/test"}
+        let child_tag = (worker-mailbox-tag)
+        let child_job = (job spawn --description "test reap no result" {
+            try {
+                error make {msg: "simulated runner crash"}
+            } catch {|err|
+                let err_msg = ($err.msg? | default "runner exception")
+                let _result_path = (flight-job-dir $job_id | path join "result.json")
+                flight-append-event $job_id {event: "runner_exception", error: $err_msg}
+                if not ($_result_path | path exists) {
+                    let result_record = {
+                        job_id: $job_id
+                        repo: $jobspec.repo
+                        issue_number: $jobspec.issue_number
+                        title: "Reap test"
+                        worker: $jobspec.worker
+                        profile: $jobspec.profile
+                        mode: $jobspec.mode
+                        budget_minutes: $jobspec.budget_minutes
+                        description: $jobspec.description
+                        category: "INTERNAL_ERROR"
+                        failure_signature: "runner_exception"
+                        duration_seconds: 0
+                        exit_code: 1
+                        timed_out: false
+                        local_branch: ""
+                        local_sha: ""
+                        worktree_clean: false
+                        remote_exists: false
+                        remote_sha: ""
+                        sha_match: false
+                        branch_match: false
+                        changed_file_count: 0
+                        tool_calls: 0
+                        tool_failures: 0
+                        completed_at: (iso-now-utc)
+                        closeout_ran: false
+                    }
+                    flight-write-result $job_id $result_record
+                }
+            }
+            {done: true} | job send 0 --tag $child_tag
+        })
+        let msg = (try { job recv --tag $child_tag --timeout 30sec } catch { null })
+        assert ($msg != null) "child sent terminal message"
+        let result_exists = (flight-job-dir $job_id | path join "result.json" | path exists)
+        assert $result_exists "result.json exists after child exception handling"
+        let result = (flight-read-result $job_id)
+        assert ($result != null) "result readable"
+        assert-equal $result.category "INTERNAL_ERROR" "category is INTERNAL_ERROR"
+    })
+    (test "exactly one INTERNAL_ERROR finalization after child exception" {
+        let job_id = "finalize-once-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let jobspec = {
+            job_id: $job_id
+            repo: "test/repo"
+            issue_number: 3
+            title: "Finalize once test"
+            base_sha: "abcdef0123456789abcdef0123456789abcdef02"
+            branch: "mimo/test"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/repo", resource_key: "test/repo:mimo/test"}
+        let child_tag = (worker-mailbox-tag)
+        let child_job = (job spawn --description "test finalize once" {
+            try {
+                error make {msg: "simulated crash"}
+            } catch {|err|
+                let _result_path = (flight-job-dir $job_id | path join "result.json")
+                flight-append-event $job_id {event: "runner_exception", error: ($err.msg? | default "error")}
+                if not ($_result_path | path exists) {
+                    let result_record = {
+                        job_id: $job_id
+                        repo: $jobspec.repo
+                        issue_number: $jobspec.issue_number
+                        title: "Finalize once test"
+                        worker: $jobspec.worker
+                        profile: $jobspec.profile
+                        mode: $jobspec.mode
+                        budget_minutes: $jobspec.budget_minutes
+                        description: $jobspec.description
+                        category: "INTERNAL_ERROR"
+                        failure_signature: "runner_exception"
+                        duration_seconds: 0
+                        exit_code: 1
+                        timed_out: false
+                        local_branch: ""
+                        local_sha: ""
+                        worktree_clean: false
+                        remote_exists: false
+                        remote_sha: ""
+                        sha_match: false
+                        branch_match: false
+                        changed_file_count: 0
+                        tool_calls: 0
+                        tool_failures: 0
+                        completed_at: (iso-now-utc)
+                        closeout_ran: false
+                    }
+                    flight-write-result $job_id $result_record
+                }
+            }
+            {done: true} | job send 0 --tag $child_tag
+        })
+        let msg = (try { job recv --tag $child_tag --timeout 30sec } catch { null })
+        assert ($msg != null) "child sent message"
+        let job_record = {
+            job_id: $job_id
+            job_dir: $job_dir
+            jobspec: $jobspec
+            resource_key: "test/repo:mimo/test"
+            original_title: "Finalize once test"
+            admission: {ok: true, packet: "test"}
+            started_at: (date now)
+            soft_deadline_ns: 999999999999
+            hard_deadline_ns: 999999999999
+            closeout_started: false
+            child_job: $child_job
+            child_tag: $child_tag
+        }
+        let result_record = (flight-read-result $job_id)
+        assert ($result_record != null) "result exists"
+        controller-finalize-job $job_record $result_record
+        let events = (flight-read-events $job_id)
+        let finalized_count = ($events | where {|e| $e.event == "finalized"} | length)
+        assert-equal $finalized_count 1 "finalized exactly once"
+    })
+    (test "slot becomes available after child exception reaped" {
+        let active = ["repo1:branch1" "repo2:branch2" "repo3:branch3"]
+        let full_result = (watch-slot-acquire $active "repo4:branch4" 3)
+        assert (not $full_result.ok) "full capacity rejects"
+        let active_freed = ["repo1:branch1" "repo2:branch2"]
+        let freed_result = (watch-slot-acquire $active_freed "repo4:branch4" 3)
+        assert $freed_result.ok "freed slot accepts"
+    })
+    (test "normal child completion still finalizes once" {
+        let fake_repo = ($test_root | path join "normal-repo")
+        mkdir $fake_repo
+        (run-external "git" "-C" $fake_repo "init" "--bare" "-b" "main" | complete) | ignore
+        let work = ($test_root | path join "normal-work")
+        mkdir $work
+        (run-external "git" "-c" "init.defaultBranch=main" "clone" $fake_repo $work | complete) | ignore
+        ("# init" | save --force ($work | path join "README.md"))
+        (run-external "git" "-C" $work "add" "." | complete) | ignore
+        (run-external "git" "-C" $work "-c" "user.email=test@test.com" "-c" "user.name=test" "commit" "-m" "init" | complete) | ignore
+        (run-external "git" "-C" $work "push" "-u" "origin" "main" | complete) | ignore
+        let base_sha = ((run-external "git" "-C" $work "rev-parse" "HEAD" | complete).stdout | str trim)
+        let test_result = {
+            status: "completed"
+            exit_code: 0
+            tool_calls: 1
+            tool_failures: 0
+            changed_files: ["src/a.nu"]
+            duration_seconds: 2
+            timed_out: false
+            final_text: "done"
+            model: "mimo-v2.5"
+            backend: "opencode"
+            provider: "m2c-mimo"
+            session_id: null
+            workstream: null
+            packet: null
+            budget_minutes: 20
+            context_estimate_tokens: null
+            context_percent: null
+            checkpoint_recommended: false
+            agent: "build"
+        }
+        let backend_file = ($test_root | path join "normal-backend.json")
+        $test_result | to json -r | save --force $backend_file
+        let job_id = "normal-complete-001"
+        let job_dir = ($test_root | path join $"watch-($job_id)")
+        mkdir $job_dir
+        let jobspec = {
+            job_id: $job_id
+            repo: "local/normal"
+            issue_number: 4
+            title: "Normal completion test"
+            base_sha: $base_sha
+            branch: "mimo/normal"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        flight-write-manifest $job_id {job_id: $job_id, repo: "local/normal", resource_key: "local/normal:mimo/normal"}
+        let child_tag = (worker-mailbox-tag)
+        with-env {M2C_TEST_WORKER_BACKEND: $backend_file, M2C_TEST_REPO_ROOT: $fake_repo} {
+            let child_job = (job spawn --description "test normal completion" {
+                try {
+                    let _r = (controller-runner $job_dir $jobspec "Do work.")
+                } catch {|err|
+                    let err_msg = (redact-secrets ($err.msg? | default "runner exception"))
+                    let _result_path = (flight-job-dir $job_id | path join "result.json")
+                    flight-append-event $job_id {event: "runner_exception", error: $err_msg}
+                    if not ($_result_path | path exists) {
+                        flight-write-result $job_id {job_id: $job_id, repo: "local/normal", issue_number: 4, title: "Normal completion test", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null, category: "INTERNAL_ERROR", failure_signature: "runner_exception", duration_seconds: 0, exit_code: 1, timed_out: false, local_branch: "", local_sha: "", worktree_clean: false, remote_exists: false, remote_sha: "", sha_match: false, branch_match: false, changed_file_count: 0, tool_calls: 0, tool_failures: 0, completed_at: (iso-now-utc), closeout_ran: false}
+                    }
+                }
+                {done: true} | job send 0 --tag $child_tag
+            })
+            let msg = (try { job recv --tag $child_tag --timeout 30sec } catch { null })
+            assert ($msg != null) "normal child sent message"
+        }
+        let result = (flight-read-result $job_id)
+        assert ($result != null) "normal result written"
+        assert ($result.category in ["DONE" "DELIVERY_FAILED" "NO_CHANGES"]) "normal category is not INTERNAL_ERROR"
+        let job_record = {
+            job_id: $job_id
+            job_dir: $job_dir
+            jobspec: $jobspec
+            resource_key: "local/normal:mimo/normal"
+            original_title: "Normal completion test"
+            admission: {ok: true, packet: "Do work."}
+            started_at: (date now)
+            soft_deadline_ns: 999999999999
+            hard_deadline_ns: 999999999999
+            closeout_started: false
+            child_job: null
+            child_tag: $child_tag
+        }
+        controller-finalize-job $job_record $result
+        let events = (flight-read-events $job_id)
+        let finalized_count = ($events | where {|e| $e.event == "finalized"} | length)
+        assert-equal $finalized_count 1 "normal completion finalized exactly once"
+    })
+    (test "controller lock released on genuine fatal watch error" {
+        let lock_path = (controller-lock-path)
+        if ($lock_path | path exists) { rm $lock_path }
+        controller-write-lock 1
+        assert ($lock_path | path exists) "lock exists before error"
+        let caught = (try {
+            error make {msg: "simulated fatal controller error"}
+        } catch {|err|
+            let err_msg = ($err.msg? | default "watch error")
+            controller-release-lock
+            "error_caught"
+        })
+        assert-equal $caught "error_caught" "error caught"
+        assert (not ($lock_path | path exists)) "lock released after fatal error"
+    })
+    (test "error reporting preserves structured error context" {
+        let err = {msg: "test error detail", span: {start: 100, end: 200, source: "test.nu"}}
+        let err_msg = ($err.msg? | default "watch error")
+        let err_detail = (try { $err | to json -r } catch { "" })
+        assert ($err_msg | str contains "test error detail") "error message preserved"
+        assert ($err_detail | str contains "test error detail") "error detail contains message"
+        assert ($err_detail | str contains "span") "error detail contains span"
+    })
+    (test "error reporting shows more than wrapper-only External command failed" {
+        let err = {msg: "controller-runner failed: git clone returned exit code 128"}
+        let err_msg = ($err.msg? | default "watch error")
+        assert ($err_msg | str contains "git clone") "error includes git detail"
+        assert ($err_msg | str contains "exit code 128") "error includes exit code"
+        assert (not ($err_msg == "External command failed")) "not just wrapper message"
+    })
+    (test "closeout exception writes INTERNAL_ERROR with closeout_ran true" {
+        let job_id = "closeout-except-001"
+        let jobspec = {
+            job_id: $job_id
+            repo: "test/closeout"
+            issue_number: 5
+            title: "Closeout exception test"
+            base_sha: "abcdef0123456789abcdef0123456789abcdef02"
+            branch: "mimo/closeout"
+            worker: "mimo"
+            profile: "standard"
+            mode: "build"
+            budget_minutes: 20
+            description: null
+        }
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/closeout", resource_key: "test/closeout:mimo/closeout"}
+        let closeout_tag = (worker-mailbox-tag)
+        let closeout_child = (job spawn --description "test closeout exception" {
+            try {
+                error make {msg: "simulated closeout crash"}
+            } catch {|err|
+                let err_msg = (redact-secrets ($err.msg? | default "closeout exception"))
+                let _closeout_result_path = (flight-job-dir $job_id | path join "result.json")
+                flight-append-event $job_id {event: "closeout_exception", error: $err_msg}
+                if not ($_closeout_result_path | path exists) {
+                    let result_record = {
+                        job_id: $job_id
+                        repo: $jobspec.repo
+                        issue_number: $jobspec.issue_number
+                        title: "Closeout exception test"
+                        worker: $jobspec.worker
+                        profile: $jobspec.profile
+                        mode: $jobspec.mode
+                        budget_minutes: $jobspec.budget_minutes
+                        description: $jobspec.description
+                        category: "INTERNAL_ERROR"
+                        failure_signature: "closeout_exception"
+                        duration_seconds: 0
+                        exit_code: 1
+                        timed_out: false
+                        local_branch: ""
+                        local_sha: ""
+                        worktree_clean: false
+                        remote_exists: false
+                        remote_sha: ""
+                        sha_match: false
+                        branch_match: false
+                        changed_file_count: 0
+                        tool_calls: 0
+                        tool_failures: 0
+                        completed_at: (iso-now-utc)
+                        closeout_ran: true
+                    }
+                    flight-write-result $job_id $result_record
+                }
+            }
+            {done: true} | job send 0 --tag $closeout_tag
+        })
+        let msg = (try { job recv --tag $closeout_tag --timeout 30sec } catch { null })
+        assert ($msg != null) "closeout child sent message"
+        let result = (flight-read-result $job_id)
+        assert ($result != null) "closeout result written"
+        assert-equal $result.category "INTERNAL_ERROR" "closeout exception is INTERNAL_ERROR"
+        assert-equal $result.failure_signature "closeout_exception" "closeout exception signature"
+        assert-equal $result.closeout_ran true "closeout_ran is true"
+        let events = (flight-read-events $job_id)
+        assert ($events | any {|e| $e.event == "closeout_exception"}) "closeout_exception event recorded"
+    })
+    (test "resident watcher capacity tests from PR 34 remain intact" {
+        assert-equal (watch-parse-jobs ["--stay"] true) 3 "default capacity 3"
+        assert-equal (watch-parse-jobs ["--stay" "--jobs" "1"] true) 1 "capacity 1"
+        assert-equal (watch-parse-jobs ["--stay" "--jobs" "2"] true) 2 "capacity 2"
+        assert-equal (watch-parse-jobs ["--stay" "--jobs" "3"] true) 3 "capacity 3"
+        let active = ["r1:b1" "r2:b2" "r3:b3"]
+        assert (not (watch-slot-acquire $active "r4:b4" 3).ok) "4th rejected at capacity 3"
+        assert (not (watch-slot-acquire $active "r1:b1" 3).ok) "same key rejected"
+        let freed = ["r1:b1" "r2:b2"]
+        assert (watch-slot-acquire $freed "r3:b3" 3).ok "freed slot accepts"
+    })
 ]
 
 print ($results | table)
