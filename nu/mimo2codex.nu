@@ -121,6 +121,23 @@ def version-value [] { open (source-root | path join "VERSION") | str trim }
 def source-hash-short [] { try { open --raw (source-root | path join "mimo2codex.nu") | hash sha256 | str substring 0..7 } catch { "unknown" } }
 def startup-identity [] { $"m2c (version-value) · (source-hash-short)" }
 
+def stale-detection-root [] {
+    let override = ($env.M2C_TEST_STALE_ROOT? | default "" | str trim)
+    if ($override | is-not-empty) { $override | path expand } else { state-root }
+}
+def installed-runtime-identity [] {
+    let root = (stale-detection-root)
+    let ver = (version-at $root)
+    let hash = (file-hash-at $root)
+    {version: $ver, source_hash: $hash}
+}
+def running-runtime-identity [] {
+    {version: (version-value), source_hash: (source-hash-short)}
+}
+def check-stale [running: record installed: record] {
+    ($running.version != $installed.version) or ($running.source_hash != $installed.source_hash)
+}
+
 def controller-lock-path [] { state-root | path join "controller.lock" }
 
 def controller-acquire-lock [] {
@@ -605,7 +622,7 @@ def live-tty-enabled [quiet: bool] {
     }
 }
 
-def live-panel-state [active_jobs: list max_slots: int queued_count: int] {
+def live-panel-state [active_jobs: list max_slots: int queued_count: int stale: bool = false installed_version: string = ""] {
     let now = (date now)
     let active = ($active_jobs | each {|job|
         let elapsed_ns = (($now - $job.started_at) | into int)
@@ -624,13 +641,19 @@ def live-panel-state [active_jobs: list max_slots: int queued_count: int] {
         }
     })
     let free = ($max_slots - ($active | length))
-    {active: $active, queued: $queued_count, free: $free, max_slots: $max_slots, now: $now}
+    {active: $active, queued: $queued_count, free: $free, max_slots: $max_slots, now: $now, stale: $stale, installed_version: $installed_version}
 }
 
 def live-panel-frame [state: record] {
     let ver = (version-value)
     let active_count = ($state.active | length)
-    let header = $"m2c ($ver) · watching · ($active_count) active · ($state.queued) queued"
+    let is_stale = ($state.stale? | default false)
+    let installed_ver = ($state.installed_version? | default "")
+    let header = (if $is_stale {
+        $"m2c ($installed_ver) · update detected · draining · ($active_count) active"
+    } else {
+        $"m2c ($ver) · watching · ($active_count) active · ($state.queued) queued"
+    })
     mut lines = [$header ""]
     for job in $state.active {
         let symbol = (if $job.phase == "CLOSEOUT" { "◐" } else { "●" })
@@ -2036,6 +2059,10 @@ def watch-command [args: list<string>] {
     mut last_panel_render_at = ((date now) - 10sec)
     mut panel_lines = 0
     mut pending_receipts = []
+    let running_identity = (running-runtime-identity)
+    mut stale_detected = false
+    mut stale_emitted = false
+    mut stale_installed_version = ""
     if $tty_on {
         let esc = (char --integer 27)
         print -n --stderr $"($esc)[?25l"
@@ -2043,10 +2070,17 @@ def watch-command [args: list<string>] {
     try {
         while true {
             $iterations = $iterations + 1
+            if (not $stale_detected) and ($iterations mod 60 == 0) {
+                let installed_id = (installed-runtime-identity)
+                if (check-stale $running_identity $installed_id) {
+                    $stale_detected = true
+                    $stale_installed_version = $installed_id.version
+                }
+            }
             let available_slots = ($max_slots - ($active_jobs | length))
             let now_poll = (date now)
             let poll_elapsed = (((($now_poll - $last_poll_at) | into int) / 1000000000) | math round | into int)
-            if $available_slots > 0 and ($poll_elapsed >= 12) {
+            if $available_slots > 0 and ($poll_elapsed >= 12) and (not $stale_detected) {
                 $last_poll_at = $now_poll
                 let jobs = (watch-gh-find-job $login)
                 let sorted_jobs = (watch-deterministic-sort $jobs)
@@ -2367,6 +2401,14 @@ def watch-command [args: list<string>] {
             if ($completed_indices | length) > 0 {
                 $active_jobs = ($active_jobs | enumerate | where {|row| not ($row.index in $completed_indices)} | get item)
             }
+            if $stale_detected and (not $stale_emitted) {
+                $stale_emitted = true
+                if $tty_on {
+                    $pending_receipts = ($pending_receipts | append $"m2c ($stale_installed_version) · update detected · draining · ($active_jobs | length) active")
+                } else {
+                    print $"m2c ($stale_installed_version) · update detected · draining · ($active_jobs | length) active"
+                }
+            }
             let render_now = (date now)
             let render_elapsed = (((($render_now - $last_panel_render_at) | into int) / 1000000000) | math round | into int)
             if $tty_on and ($render_elapsed >= 6 or $panel_lines == 0) {
@@ -2382,14 +2424,27 @@ def watch-command [args: list<string>] {
                     print -n --stderr $receipt_buf
                     $pending_receipts = []
                 }
-                let state = (live-panel-state $active_jobs $max_slots $queued_count)
+                let state = (live-panel-state $active_jobs $max_slots $queued_count $stale_detected $stale_installed_version)
                 let frame = (live-panel-frame $state)
                 $panel_lines = (live-render-panel $frame $panel_lines)
                 $last_panel_render_at = $render_now
             }
             if ($once or $check) and ($active_jobs | is-empty) { break }
             if (not $stay) and ($active_jobs | is-empty) { break }
-            if ($active_jobs | is-empty) {
+            if $stale_detected and ($active_jobs | is-empty) {
+                if (not $stale_emitted) {
+                    $stale_emitted = true
+                    if $tty_on {
+                        $pending_receipts = ($pending_receipts | append $"m2c ($stale_installed_version) · update detected · clean exit")
+                    } else {
+                        print $"m2c ($stale_installed_version) · update detected · clean exit"
+                    }
+                }
+                break
+            }
+            if $stale_detected {
+                try { sleep 1sec } catch { break }
+            } else if ($active_jobs | is-empty) {
                 try { sleep 12sec } catch { break }
             } else {
                 try { sleep 1sec } catch { break }

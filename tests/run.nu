@@ -2696,7 +2696,7 @@ let results = [
         assert (($frame | first) | str contains "watching") "header contains watching"
         assert (($frame | first) | str contains "0 active") "header shows 0 active"
         assert (($frame | first) | str contains "1 queued") "header shows 1 queued"
-        assert (($frame | first) | str contains "0.2.5") "header contains version"
+        assert (($frame | first) | str contains "0.2.6") "header contains version"
     })
     (test "live-panel-frame shows active job details" {
         let now = (date now)
@@ -2827,8 +2827,8 @@ let results = [
         }
     })
     # --- live panel: version value is 0.2.5 ---
-    (test "version-value returns 0.2.5" {
-        assert-equal (version-value) "0.2.5" "version bumped"
+    (test "version-value returns 0.2.6" {
+        assert-equal (version-value) "0.2.6" "version bumped"
     })
     # --- live panel: queue count reflects controller truth ---
     (test "live-panel-state queued count passes through from controller" {
@@ -4193,9 +4193,181 @@ let results = [
         assert (not $missing.exists) "missing dependency is distinguished"
     })
     # --- version bump ---
-    (test "version is 0.2.5" {
+    (test "version is 0.2.6" {
         let ver = (open ($project_root | path join "VERSION") | str trim)
-        assert-equal $ver "0.2.5" "version bumped"
+        assert-equal $ver "0.2.6" "version bumped"
+    })
+    # --- stale watcher detection ---
+    (test "stale-detection-root defaults to state-root" {
+        $env.M2C_TEST_STALE_ROOT = ""
+        let root = (stale-detection-root)
+        let expected = (state-root)
+        assert-equal $root $expected "defaults to state-root"
+    })
+    (test "stale-detection-root uses M2C_TEST_STALE_ROOT when set" {
+        let fixture = ($test_root | path join "stale-fixture")
+        mkdir $fixture
+        $env.M2C_TEST_STALE_ROOT = $fixture
+        let root = (stale-detection-root)
+        assert-equal $root $fixture "uses fixture root"
+        $env.M2C_TEST_STALE_ROOT = ""
+    })
+    (test "installed-runtime-identity reads from stale-detection-root" {
+        let fixture = ($test_root | path join "stale-id-fixture")
+        mkdir $fixture
+        "0.2.5" | save --force ($fixture | path join "VERSION")
+        "# content" | save --force ($fixture | path join "mimo2codex.nu")
+        $env.M2C_TEST_STALE_ROOT = $fixture
+        let id = (installed-runtime-identity)
+        assert-equal $id.version "0.2.5" "version from fixture"
+        assert ($id.source_hash | is-not-empty) "hash from fixture"
+        assert ($id.source_hash != "unknown") "hash is computed"
+        $env.M2C_TEST_STALE_ROOT = ""
+    })
+    (test "check-stale returns false when identity matches" {
+        let running = {version: "0.2.5", source_hash: "abc123"}
+        let installed = {version: "0.2.5", source_hash: "abc123"}
+        assert (not (check-stale $running $installed)) "matching identity is not stale"
+    })
+    (test "check-stale returns true when version changes" {
+        let running = {version: "0.2.5", source_hash: "abc123"}
+        let installed = {version: "0.2.6", source_hash: "abc123"}
+        assert (check-stale $running $installed) "version change detected"
+    })
+    (test "check-stale returns true when source hash changes" {
+        let running = {version: "0.2.5", source_hash: "abc123"}
+        let installed = {version: "0.2.5", source_hash: "def456"}
+        assert (check-stale $running $installed) "source hash change detected"
+    })
+    (test "check-stale returns true when both version and hash change" {
+        let running = {version: "0.2.5", source_hash: "abc123"}
+        let installed = {version: "0.2.6", source_hash: "def456"}
+        assert (check-stale $running $installed) "both changes detected"
+    })
+    (test "running-runtime-identity returns version and hash" {
+        let id = (running-runtime-identity)
+        assert-equal $id.version (version-value) "version matches"
+        assert ($id.source_hash | is-not-empty) "hash is present"
+    })
+    (test "stale detection with fixture: version change is detectable" {
+        let fixture = ($test_root | path join "stale-version-fixture")
+        mkdir $fixture
+        let project_source = ($project_root | path join "nu" | path join "mimo2codex.nu")
+        let source_content = (open --raw $project_source)
+        $source_content | save --force ($fixture | path join "mimo2codex.nu")
+        "0.2.5" | save --force ($fixture | path join "VERSION")
+        $env.M2C_TEST_STALE_ROOT = $fixture
+        let installed_id = (installed-runtime-identity)
+        assert-equal $installed_id.version "0.2.5" "fixture version is 0.2.5"
+        let running_id = {version: "0.2.5", source_hash: $installed_id.source_hash}
+        assert (not (check-stale $running_id $installed_id)) "same version not stale"
+        "0.2.6" | save --force ($fixture | path join "VERSION")
+        let new_installed = (installed-runtime-identity)
+        assert-equal $new_installed.version "0.2.6" "fixture updated to 0.2.6"
+        assert (check-stale $running_id $new_installed) "version change detected via fixture"
+        $env.M2C_TEST_STALE_ROOT = ""
+    })
+    (test "stale detection with fixture: source hash change is detectable" {
+        let fixture = ($test_root | path join "stale-hash-fixture")
+        mkdir $fixture
+        let project_source = ($project_root | path join "nu" | path join "mimo2codex.nu")
+        let source_content = (open --raw $project_source)
+        $source_content | save --force ($fixture | path join "mimo2codex.nu")
+        "0.2.5" | save --force ($fixture | path join "VERSION")
+        $env.M2C_TEST_STALE_ROOT = $fixture
+        let installed_id = (installed-runtime-identity)
+        let running_id = {version: "0.2.5", source_hash: $installed_id.source_hash}
+        assert (not (check-stale $running_id $installed_id)) "same hash not stale"
+        "# changed source" | save --force ($fixture | path join "mimo2codex.nu")
+        let new_installed = (installed-runtime-identity)
+        assert ($new_installed.source_hash != $installed_id.source_hash) "hash changed in fixture"
+        assert (check-stale $running_id $new_installed) "hash change detected via fixture"
+        $env.M2C_TEST_STALE_ROOT = ""
+    })
+    (test "stale detection: VERSION change is surfaced even with same source hash" {
+        let fixture = ($test_root | path join "stale-version-only-fixture")
+        mkdir $fixture
+        let project_source = ($project_root | path join "nu" | path join "mimo2codex.nu")
+        let source_content = (open --raw $project_source)
+        $source_content | save --force ($fixture | path join "mimo2codex.nu")
+        "0.2.5" | save --force ($fixture | path join "VERSION")
+        $env.M2C_TEST_STALE_ROOT = $fixture
+        let installed_id = (installed-runtime-identity)
+        let running_id = {version: "0.2.5", source_hash: $installed_id.source_hash}
+        assert (not (check-stale $running_id $installed_id)) "not stale initially"
+        "0.2.6" | save --force ($fixture | path join "VERSION")
+        let new_installed = (installed-runtime-identity)
+        assert (check-stale $running_id $new_installed) "version-only change detected"
+        assert-equal $new_installed.version "0.2.6" "new version surfaced"
+        $env.M2C_TEST_STALE_ROOT = ""
+    })
+    (test "stale detection: queued job is never BLOCKED by stale watcher" {
+        let blocked_title = "[M2C BLOCKED]"
+        assert ($blocked_title | str starts-with "[M2C BLOCKED]") "BLOCKED title format"
+        assert (not ($blocked_title | str starts-with "[M2C QUEUED]")) "BLOCKED not matched by queued filter"
+        assert (not ($blocked_title | str starts-with "[M2C RUNNING]")) "BLOCKED not matched by running filter"
+    })
+    (test "live-panel-frame header shows stale state" {
+        let now = (date now)
+        let state = {active: [], queued: 0, free: 3, max_slots: 3, now: $now, stale: true, installed_version: "0.2.6"}
+        let frame = (live-panel-frame $state)
+        let header = ($frame | first)
+        assert ($header | str contains "0.2.6") "stale header shows installed version"
+        assert ($header | str contains "update detected") "stale header mentions update"
+        assert ($header | str contains "draining") "stale header mentions draining"
+        assert (not ($header | str contains "watching")) "stale header does not say watching"
+    })
+    (test "live-panel-frame header shows normal state when not stale" {
+        let now = (date now)
+        let state = {active: [], queued: 0, free: 3, max_slots: 3, now: $now, stale: false, installed_version: ""}
+        let frame = (live-panel-frame $state)
+        let header = ($frame | first)
+        assert ($header | str contains "watching") "normal header says watching"
+        assert ($header | str contains "0.2.6") "normal header shows version"
+        assert (not ($header | str contains "draining")) "normal header does not say draining"
+    })
+    (test "live-panel-state passes stale flag through" {
+        let state = (live-panel-state [] 3 0 true "0.2.6")
+        assert $state.stale "stale flag preserved"
+        assert-equal $state.installed_version "0.2.6" "installed version preserved"
+    })
+    (test "live-panel-state defaults to not stale" {
+        let state = (live-panel-state [] 3 0)
+        assert (not $state.stale) "default not stale"
+        assert-equal $state.installed_version "" "default empty version"
+    })
+    (test "stale detection: TTY panel shows draining with active count" {
+        let now = (date now)
+        let job = {title: "Test job", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 100, closeout_at: $now, deadline_at: ($now + 60sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now, stale: true, installed_version: "0.2.6"}
+        let frame = (live-panel-frame $state)
+        let header = ($frame | first)
+        assert ($header | str contains "1 active") "shows 1 active job"
+        assert ($header | str contains "draining") "shows draining"
+    })
+    (test "stale detection: redirected output has no ANSI" {
+        let state = {active: [], queued: 0, free: 3, max_slots: 3, now: (date now), stale: true, installed_version: "0.2.6"}
+        let frame = (live-panel-frame $state)
+        let text = ($frame | str join "\n")
+        assert (not ($text | str contains (char --integer 27))) "no ANSI in stale frame"
+    })
+    (test "stale detection: source hash change detected even if VERSION unchanged" {
+        let fixture = ($test_root | path join "stale-hash-only-fixture")
+        mkdir $fixture
+        let project_source = ($project_root | path join "nu" | path join "mimo2codex.nu")
+        let source_content = (open --raw $project_source)
+        $source_content | save --force ($fixture | path join "mimo2codex.nu")
+        "0.2.5" | save --force ($fixture | path join "VERSION")
+        $env.M2C_TEST_STALE_ROOT = $fixture
+        let installed_id = (installed-runtime-identity)
+        let running_id = {version: "0.2.5", source_hash: $installed_id.source_hash}
+        assert (not (check-stale $running_id $installed_id)) "not stale with same content"
+        "def --wrapped changed [] {}" | save --force ($fixture | path join "mimo2codex.nu")
+        let new_installed = (installed-runtime-identity)
+        assert-equal $new_installed.version "0.2.5" "version unchanged"
+        assert ($new_installed.source_hash != $installed_id.source_hash) "hash changed"
+        assert (check-stale $running_id $new_installed) "hash-only change detected"
+        $env.M2C_TEST_STALE_ROOT = ""
     })
 ]
 
