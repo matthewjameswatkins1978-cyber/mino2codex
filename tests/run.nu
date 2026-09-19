@@ -4725,7 +4725,6 @@ let results = [
             assert (($truncated | split chars | length) <= 40) $"line bounded to 40: ($truncated)"
         }
     })
-    })
 ]
 
 print ($results | table)
