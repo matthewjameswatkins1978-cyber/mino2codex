@@ -2696,7 +2696,7 @@ let results = [
         assert (($frame | first) | str contains "watching") "header contains watching"
         assert (($frame | first) | str contains "0 active") "header shows 0 active"
         assert (($frame | first) | str contains "1 queued") "header shows 1 queued"
-        assert (($frame | first) | str contains "0.2.6") "header contains version"
+        assert (($frame | first) | str contains "0.2.7") "header contains version"
     })
     (test "live-panel-frame shows active job details" {
         let now = (date now)
@@ -2826,9 +2826,9 @@ let results = [
             assert (($line | describe) == "string") "each line is a string"
         }
     })
-    # --- live panel: version value is 0.2.6 ---
-    (test "version-value returns 0.2.6" {
-        assert-equal (version-value) "0.2.6" "version bumped"
+    # --- live panel: version value is 0.2.7 ---
+    (test "version-value returns 0.2.7" {
+        assert-equal (version-value) "0.2.7" "version bumped"
     })
     # --- live panel: queue count reflects controller truth ---
     (test "live-panel-state queued count passes through from controller" {
@@ -4293,8 +4293,8 @@ let results = [
     (test "DONE dependency is eligible" {
         assert (watch-dependency-terminal-success "CLOSED" "[M2C DONE] finished") "closed DONE is satisfied"
     })
-    (test "open dependency is not eligible" {
-        assert (not (watch-dependency-terminal-success "OPEN" "[M2C DONE] not closed")) "open DONE is not satisfied"
+    (test "open DONE dependency is eligible (title is authority)" {
+        assert (watch-dependency-terminal-success "OPEN" "[M2C DONE] not closed") "open DONE is satisfied"
     })
     (test "PARTIAL dependency is not eligible" {
         assert (not (watch-dependency-terminal-success "CLOSED" "[M2C PARTIAL] delivered")) "PARTIAL is not satisfied"
@@ -4308,9 +4308,9 @@ let results = [
         assert (not $missing.exists) "missing dependency is distinguished"
     })
     # --- version bump ---
-    (test "version is 0.2.6" {
+    (test "version is 0.2.7" {
         let ver = (open ($project_root | path join "VERSION") | str trim)
-        assert-equal $ver "0.2.6" "version bumped"
+        assert-equal $ver "0.2.7" "version bumped"
     })
     # --- stale watcher detection ---
     (test "stale-detection-root defaults to state-root" {
@@ -4438,7 +4438,7 @@ let results = [
         let frame = (live-panel-frame $state)
         let header = ($frame | first)
         assert ($header | str contains "watching") "normal header says watching"
-        assert ($header | str contains "0.2.6") "normal header shows version"
+        assert ($header | str contains "0.2.7") "normal header shows version"
         assert (not ($header | str contains "draining")) "normal header does not say draining"
     })
     (test "live-panel-state passes stale flag through" {
@@ -4483,6 +4483,102 @@ let results = [
         assert ($new_installed.source_hash != $installed_id.source_hash) "hash changed"
         assert (check-stale $running_id $new_installed) "hash-only change detected"
         $env.M2C_TEST_STALE_ROOT = ""
+    })
+    # --- dependency satisfaction integration: DONE title is the semantic authority ---
+    (test "DONE title centralizes as predicate source" {
+        assert-equal (watch-m2c-done-title) "[M2C DONE]" "centralized done title"
+        assert (watch-dependency-terminal-success "OPEN" "[M2C DONE] finished") "open with DONE title is satisfied"
+        assert (watch-dependency-terminal-success "CLOSED" "[M2C DONE] finished") "closed with DONE title is satisfied"
+    })
+    (test "PARTIAL never satisfies dependency regardless of state" {
+        assert (not (watch-dependency-terminal-success "CLOSED" "[M2C PARTIAL] delivered")) "closed PARTIAL not satisfied"
+        assert (not (watch-dependency-terminal-success "OPEN" "[M2C PARTIAL] delivered")) "open PARTIAL not satisfied"
+    })
+    (test "TIMED_OUT never satisfies dependency regardless of state" {
+        assert (not (watch-dependency-terminal-success "CLOSED" "[M2C TIMED_OUT] timed")) "closed TIMED_OUT not satisfied"
+        assert (not (watch-dependency-terminal-success "OPEN" "[M2C TIMED_OUT] timed")) "open TIMED_OUT not satisfied"
+    })
+    (test "BLOCKED never satisfies dependency" {
+        assert (not (watch-dependency-terminal-success "OPEN" "[M2C BLOCKED] blocked")) "open BLOCKED not satisfied"
+        assert (not (watch-dependency-terminal-success "CLOSED" "[M2C BLOCKED] blocked")) "closed BLOCKED not satisfied"
+    })
+    (test "WORKER_FAILED never satisfies dependency" {
+        assert (not (watch-dependency-terminal-success "CLOSED" "[M2C WORKER_FAILED] error")) "closed WORKER_FAILED not satisfied"
+    })
+    (test "DELIVERY_FAILED never satisfies dependency" {
+        assert (not (watch-dependency-terminal-success "CLOSED" "[M2C DELIVERY_FAILED] failed")) "closed DELIVERY_FAILED not satisfied"
+    })
+    (test "INTERNAL_ERROR never satisfies dependency" {
+        assert (not (watch-dependency-terminal-success "CLOSED" "[M2C INTERNAL_ERROR] crash")) "closed INTERNAL_ERROR not satisfied"
+    })
+    (test "closed non-DONE issue is not dependency success" {
+        assert (not (watch-dependency-terminal-success "CLOSED" "[M2C RUNNING] work")) "closed RUNNING not satisfied"
+        assert (not (watch-dependency-terminal-success "CLOSED" "[M2C QUEUED] pending")) "closed QUEUED not satisfied"
+        assert (not (watch-dependency-terminal-success "CLOSED" "plain title")) "closed plain title not satisfied"
+    })
+    (test "DONE finalization is idempotent via flight events" {
+        let job_id = "dep-idempotent-001"
+        let jobspec = {job_id: $job_id, repo: "test/dep", issue_number: 1, title: "Idempotent test", base_sha: "abcdef0123456789abcdef0123456789abcdef02", branch: "mimo/dep", worker: "mimo", profile: "standard", mode: "build", budget_minutes: 20, description: null}
+        flight-write-manifest $job_id {job_id: $job_id, repo: "test/dep", resource_key: "test/dep:mimo/dep"}
+        let result_record = {job_id: $job_id, repo: "test/dep", issue_number: 1, title: "Idempotent test", category: "DONE", duration_seconds: 10, exit_code: 0, changed_file_count: 1, completed_at: (iso-now-utc), closeout_ran: false, phase: "main", generation: 0}
+        flight-write-result $job_id $result_record
+        let job_record = {job_id: $job_id, job_dir: ($test_root | path join "dep-idem"), jobspec: $jobspec, resource_key: "test/dep:mimo/dep", original_title: "Idempotent test", admission: {ok: true, packet: "test"}, started_at: (date now), soft_deadline_ns: 999999999999, hard_deadline_ns: 999999999999, closeout_started: false, child_job: null, child_tag: (worker-mailbox-tag)}
+        controller-finalize-job $job_record $result_record
+        controller-finalize-job $job_record $result_record
+        controller-finalize-job $job_record $result_record
+        let events = (flight-read-events $job_id)
+        let finalized_count = ($events | where {|e| $e.event == "finalized"} | length)
+        assert-equal $finalized_count 1 "finalized exactly once despite multiple calls"
+    })
+    (test "controller finalization sets DONE title recognized by dependency evaluator" {
+        let done_title = $"(watch-m2c-done-title) original title"
+        assert ($done_title | str starts-with (watch-m2c-done-title)) "finalized title starts with DONE prefix"
+        assert (watch-dependency-terminal-success "OPEN" $done_title) "open DONE title satisfies dependency"
+        assert (watch-dependency-terminal-success "CLOSED" $done_title) "closed DONE title satisfies dependency"
+    })
+    (test "non-DONE categories never satisfy dependency evaluator" {
+        let categories = ["PARTIAL" "TIMED_OUT" "WORKER_FAILED" "DELIVERY_FAILED" "INTERNAL_ERROR" "NO_CHANGES"]
+        for cat in $categories {
+            let title = $"[M2C ($cat)] test"
+            assert (not (watch-dependency-terminal-success "OPEN" $title)) $"open ($cat) not satisfied"
+            assert (not (watch-dependency-terminal-success "CLOSED" $title)) $"closed ($cat) not satisfied"
+        }
+    })
+    (test "dependency check-dep-issue respects DONE title without requiring close" {
+        let test_issue_number = 999999
+        let test_repo = "nonexistent/repo"
+        let check = (watch-check-dep-issue $test_repo $test_issue_number)
+        assert (not $check.satisfied) "nonexistent issue not satisfied"
+        assert (not $check.exists) "nonexistent issue flagged as not existing"
+        assert ($check.reason | str contains "could not fetch") "reason mentions fetch failure"
+    })
+    (test "watch-deps-satisfied propagates DONE title semantics" {
+        let deps_met = (watch-deps-satisfied "nonexistent/repo" [])
+        assert $deps_met.ok "empty deps always satisfied"
+    })
+    (test "no head-of-line blocking: empty deps means immediate eligibility" {
+        let deps_met = (watch-deps-satisfied "nonexistent/repo" [])
+        assert $deps_met.ok "no deps means no blocking"
+        assert-equal $deps_met.reason "" "no reason when deps empty"
+    })
+    (test "depend_on field parsed through to jobspec" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard", depends_on: "[42, 99]"}
+        let validation = (watch-validate-packet $fm)
+        assert $validation.ok "valid job with depends_on"
+        assert-equal $validation.depends_on [42 99] "depends_on parsed"
+    })
+    (test "depend_on field defaults to empty" {
+        let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "standard"}
+        let validation = (watch-validate-packet $fm)
+        assert $validation.ok "valid job without depends_on"
+        assert-equal $validation.depends_on [] "depends_on defaults empty"
+    })
+    (test "TITLE is controller-finalized terminal state not loose string check" {
+        let done_title = $"(watch-m2c-done-title) my feature"
+        assert ($done_title | str starts-with (watch-m2c-done-title)) "DONE title format is consistent"
+        assert ($done_title | str contains "my feature") "original title preserved"
+        assert (watch-dependency-terminal-success "OPEN" $done_title) "title alone is authority"
+        assert (watch-dependency-terminal-success "CLOSED" $done_title) "title alone is authority (closed)"
     })
 ]
 

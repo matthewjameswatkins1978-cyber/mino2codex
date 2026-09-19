@@ -1395,8 +1395,10 @@ def validate-depends-on [deps: list<int> issue_number: int repo: string] {
     }
 }
 
+def watch-m2c-done-title [] { "[M2C DONE]" }
+
 def watch-dependency-terminal-success [state: string title: string] {
-    (($state | str lowercase) == "closed") and ($title | str starts-with "[M2C DONE]")
+    ($title | str starts-with (watch-m2c-done-title))
 }
 
 def watch-check-dep-issue [repo: string dep_number: int] {
@@ -1410,9 +1412,9 @@ def watch-check-dep-issue [repo: string dep_number: int] {
             if (watch-dependency-terminal-success $state $title) {
                 {satisfied: true, reason: "", exists: true}
             } else if ($state == "open") {
-                {satisfied: false, reason: $"issue #($dep_str) is open (title: ($title))", exists: true}
+                {satisfied: false, reason: $"issue #($dep_str) is open without DONE title (title: ($title))", exists: true}
             } else if ($state == "closed") {
-                {satisfied: false, reason: $"issue #($dep_str) is closed but not DONE (title: ($title))", exists: true}
+                {satisfied: false, reason: $"issue #($dep_str) is closed without DONE title (title: ($title))", exists: true}
             } else {
                 {satisfied: false, reason: $"issue #($dep_str) state: ($state)", exists: true}
             }
