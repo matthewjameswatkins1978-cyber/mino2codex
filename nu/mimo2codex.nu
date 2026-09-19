@@ -683,7 +683,7 @@ def live-build-panel-bytes [frame: list<string> owned: int width: int = 0] {
     let actual_width = (if $width > 0 { $width } else { try { (term size).columns } catch { 80 } })
     let new_count = ($frame | length)
     mut buf = ""
-    $buf = $"($buf)($esc)[s"
+    $buf = $"($buf)($esc)[H"
     let last_idx = ($new_count - 1)
     mut i = 0
     for line in $frame {
@@ -710,12 +710,12 @@ def live-build-clear-bytes [owned: int] {
         {bytes: "", owned: 0}
     } else {
         let esc = (char --integer 27)
-        mut buf = $"($esc)[s"
+        mut buf = ""
         for i in 0..<$owned {
             $buf = $"($buf)\r($esc)[2K"
             if ($i + 1) < $owned { $buf = $"($buf)($esc)[1B" }
         }
-        $buf = $"($buf)($esc)[u($esc)[?25h"
+        $buf = $"($buf)($esc)[?25h($esc)[?1049l"
         {bytes: $buf, owned: 0}
     }
 }
@@ -2073,7 +2073,7 @@ def watch-command [args: list<string>] {
     mut stale_installed_version = ""
     if $tty_on {
         let esc = (char --integer 27)
-        print -n --stderr $"($esc)[?25l"
+        print -n --stderr $"($esc)[?1049h($esc)[?25l"
     }
     try {
         while true {
@@ -2426,14 +2426,12 @@ def watch-command [args: list<string>] {
             }
             if $tty_on and ($render_elapsed >= 6 or $panel_owned == 0) {
                 if ($pending_receipts | is-not-empty) {
-                    if $panel_owned > 0 {
-                        let clear_result = (live-build-clear-bytes $panel_owned)
-                        if ($clear_result.bytes | is-not-empty) { print -n --stderr $clear_result.bytes }
-                        $panel_owned = 0
-                    }
                     let esc = (char --integer 27)
                     mut receipt_buf = ""
-                    for receipt in $pending_receipts { $receipt_buf = $"($receipt_buf)($receipt)\r($esc)[1B" }
+                    for receipt in $pending_receipts {
+                        let truncated = (truncate-line $receipt $panel_width)
+                        $receipt_buf = $"($receipt_buf)($esc)[H($esc)[2K($truncated)($esc)[1B"
+                    }
                     print -n --stderr $receipt_buf
                     $pending_receipts = []
                 }
@@ -2468,7 +2466,7 @@ def watch-command [args: list<string>] {
         let err_msg = ($err.msg? | default "watch error")
         let err_detail = (try { $err | to json -r } catch { "" })
         let esc = (char --integer 27)
-        print -n --stderr $"($esc)[?25h"
+        print -n --stderr $"($esc)[?25h($esc)[?1049l"
         controller-release-lock
         print --stderr $"Watch error: ($err_msg)"
         if ($err_detail | is-not-empty) {
@@ -2476,7 +2474,13 @@ def watch-command [args: list<string>] {
         }
         controller-raise-watch-error $err
     }
-    if $tty_on { live-clear-panel $panel_owned }
+    if $tty_on {
+        live-clear-panel $panel_owned
+        if $panel_owned <= 0 {
+            let esc = (char --integer 27)
+            print -n --stderr $"($esc)[?25h($esc)[?1049l"
+        }
+    }
     controller-release-lock
     print "Watch stopped."
 }

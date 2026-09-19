@@ -2957,20 +2957,20 @@ let results = [
         }
     })
     # --- live panel redraw: cursor math correctness ---
-    (test "live-build-panel-bytes first render has save cursor and no initial cursor-up" {
+    (test "live-build-panel-bytes first render has home position and no initial cursor-up" {
         let esc = (char --integer 27)
         let frame = ["header" "" "footer"]
         let result = (live-build-panel-bytes $frame 0 80)
-        assert ($result.bytes | str contains $"($esc)[s") "save cursor present"
+        assert ($result.bytes | str contains $"($esc)[H") "home position present"
         assert (not ($result.bytes | str contains $"($esc)[1A")) "no cursor-up at start"
         assert-equal $result.owned 3 "owned matches frame length"
     })
-    (test "live-build-panel-bytes second render saves and restores cursor" {
+    (test "live-build-panel-bytes second render uses home and clears lines" {
         let esc = (char --integer 27)
         let frame = ["header" "" "footer"]
         let first = (live-build-panel-bytes $frame 0 80)
         let second = (live-build-panel-bytes $frame $first.owned 80)
-        assert ($second.bytes | str contains $"($esc)[s") "save cursor present in redraw"
+        assert ($second.bytes | str contains $"($esc)[H") "home position present in redraw"
         assert ($second.bytes | str contains $"($esc)[2K") "clear-line present"
         assert-equal $second.owned 3 "owned stable"
     })
@@ -3008,13 +3008,13 @@ let results = [
         let result = (live-build-panel-bytes $frame 0 80)
         assert ($result.bytes | str contains $"($esc)[3A") "trailing cursor-up (count-1)=3 restores to anchor"
     })
-    (test "live-build-panel-bytes shrinking frame still saves and clears" {
+    (test "live-build-panel-bytes shrinking frame still uses home and clears" {
         let esc = (char --integer 27)
         let big_frame = ["a" "b" "c" "d" "e"]
         let small_frame = ["a" "b"]
         let first = (live-build-panel-bytes $big_frame 0 80)
         let second = (live-build-panel-bytes $small_frame $first.owned 80)
-        assert ($second.bytes | str contains $"($esc)[s") "save cursor present"
+        assert ($second.bytes | str contains $"($esc)[H") "home position present"
         assert ($second.bytes | str contains $"($esc)[2K") "clear-line present"
         assert-equal $second.owned 2 "owned shrinks to 2"
     })
@@ -3023,12 +3023,11 @@ let results = [
         assert-equal $result.bytes "" "empty bytes"
         assert-equal $result.owned 0 "owned is 0"
     })
-    (test "live-build-clear-bytes uses save and restore cursor" {
+    (test "live-build-clear-bytes leaves alternate screen and shows cursor" {
         let esc = (char --integer 27)
         let result = (live-build-clear-bytes 5)
-        assert ($result.bytes | str contains $"($esc)[s") "save cursor present"
-        assert ($result.bytes | str contains $"($esc)[u") "restore cursor present"
         assert ($result.bytes | str contains $"($esc)[?25h") "cursor visible"
+        assert ($result.bytes | str contains $"($esc)[?1049l") "leaves alternate screen"
         assert-equal $result.owned 0 "owned is 0 after clear"
     })
     (test "live-build-clear-bytes output contains no line feed bytes" {
@@ -3160,12 +3159,11 @@ let results = [
         let r2 = (live-build-panel-bytes $frame 0 80)
         assert (not ($r2.bytes | str contains $lf)) "panel after receipt: no LF"
     })
-    (test "clear leaves cursor below owned region" {
+    (test "clear leaves cursor visible and exits alternate screen" {
         let esc = (char --integer 27)
         let result = (live-build-clear-bytes 5)
-        assert ($result.bytes | str contains $"($esc)[s") "save cursor"
-        assert ($result.bytes | str contains $"($esc)[u") "restore cursor"
         assert ($result.bytes | str contains $"($esc)[?25h") "cursor visible"
+        assert ($result.bytes | str contains $"($esc)[?1049l") "exits alternate screen"
         assert-equal $result.owned 0 "owned is 0"
     })
     (test "production bytes from live-render-panel contain no LF" {
@@ -4579,6 +4577,154 @@ let results = [
         assert ($done_title | str contains "my feature") "original title preserved"
         assert (watch-dependency-terminal-success "OPEN" $done_title) "title alone is authority"
         assert (watch-dependency-terminal-success "CLOSED" $done_title) "title alone is authority (closed)"
+    })
+    # === alternate screen buffer tests ===
+    (test "live-build-panel-bytes uses home positioning for absolute anchor" {
+        let esc = (char --integer 27)
+        let frame = ["header" "" "footer"]
+        let result = (live-build-panel-bytes $frame 0 80)
+        assert ($result.bytes | str contains $"($esc)[H") "home positioning present"
+        assert (not ($result.bytes | str contains $"($esc)[s")) "no save cursor in panel"
+    })
+    (test "live-build-panel-bytes refresh uses home for absolute re-anchor" {
+        let esc = (char --integer 27)
+        let frame = ["header" "" "footer"]
+        let first = (live-build-panel-bytes $frame 0 80)
+        let second = (live-build-panel-bytes $frame $first.owned 80)
+        assert ($second.bytes | str contains $"($esc)[H") "home present in refresh"
+        assert (not ($second.bytes | str contains $"($esc)[s")) "no save cursor in refresh"
+    })
+    (test "live-build-clear-bytes exits alternate screen buffer" {
+        let esc = (char --integer 27)
+        let result = (live-build-clear-bytes 5)
+        assert ($result.bytes | str contains $"($esc)[?1049l") "exits alternate screen"
+        assert ($result.bytes | str contains $"($esc)[?25h") "shows cursor"
+        assert (not ($result.bytes | str contains $"($esc)[s")) "no save cursor in clear"
+        assert (not ($result.bytes | str contains $"($esc)[u")) "no restore cursor in clear"
+    })
+    (test "100 refreshes with alternate screen produce zero scrollback growth" {
+        let state = {active: [{title: "Fix auth bug", profile: "MiMo Pro", phase: "WORKING", elapsed_seconds: 300, closeout_at: (date now), deadline_at: (date now)}], queued: 1, free: 2, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let lf = (char --integer 10)
+        let esc = (char --integer 27)
+        mut owned = 0
+        for i in 0..99 {
+            let result = (live-build-panel-bytes $frame $owned 80)
+            assert (not ($result.bytes | str contains $lf)) $"refresh ($i): no LF byte"
+            assert ($result.bytes | str contains $"($esc)[H") $"refresh ($i): uses home positioning"
+            $owned = $result.owned
+        }
+        assert-equal $owned ($frame | length) "owned matches frame after 100 refreshes"
+    })
+    (test "100 refreshes with queued count changes produce zero scrollback" {
+        let lf = (char --integer 10)
+        mut owned = 0
+        for i in 0..99 {
+            let queued = ($i mod 5)
+            let state = {active: [{title: "Job", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 60, closeout_at: (date now), deadline_at: (date now)}], queued: $queued, free: 2, max_slots: 3, now: (date now)}
+            let frame = (live-panel-frame $state)
+            let result = (live-build-panel-bytes $frame $owned 80)
+            assert (not ($result.bytes | str contains $lf)) $"refresh ($i) queued=$queued: no LF byte"
+            $owned = $result.owned
+        }
+    })
+    (test "zero -> one -> three -> one -> zero transitions use home positioning" {
+        let lf = (char --integer 10)
+        let esc = (char --integer 27)
+        let now = (date now)
+        let mkjob = {|t| {title: $t, profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 10, closeout_at: $now, deadline_at: $now} }
+        let s0 = {active: [], queued: 0, free: 3, max_slots: 3, now: $now}
+        let s1 = {active: [(do $mkjob "A")], queued: 0, free: 2, max_slots: 3, now: $now}
+        let s3 = {active: [(do $mkjob "A") (do $mkjob "B") (do $mkjob "C")], queued: 0, free: 0, max_slots: 3, now: $now}
+        let transitions = [$s0 $s1 $s3 $s1 $s0]
+        let num_transitions = ($transitions | length)
+        mut owned = 0
+        for i in 0..<($num_transitions) {
+            let frame = (live-panel-frame ($transitions | get $i))
+            let result = (live-build-panel-bytes $frame $owned 80)
+            assert (not ($result.bytes | str contains $lf)) $"transition ($i): no LF"
+            assert ($result.bytes | str contains $"($esc)[H") $"transition ($i): uses home positioning"
+            $owned = $result.owned
+        }
+    })
+    (test "narrow terminal with alternate screen uses compact stable view" {
+        let now = (date now)
+        let long_title = ("A" | fill -a right -w 100 -c 'A')
+        let job = {title: $long_title, profile: "MiMo Pro", phase: "WORKING", elapsed_seconds: 100, closeout_at: $now, deadline_at: ($now + 60sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now}
+        let frame = (live-panel-frame $state)
+        let result = (live-build-panel-bytes $frame 0 40)
+        for line in $frame {
+            let truncated = (truncate-line $line 40)
+            assert (($truncated | split chars | length) <= 40) $"line truncated to 40: ($truncated)"
+        }
+        assert-equal $result.owned ($frame | length) "owned matches frame length"
+    })
+    (test "terminal resize rebuilds layout without history growth" {
+        let lf = (char --integer 10)
+        let state = {active: [{title: "Job", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 60, closeout_at: (date now), deadline_at: (date now)}], queued: 0, free: 2, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let r1 = (live-build-panel-bytes $frame 0 80)
+        assert (not ($r1.bytes | str contains $lf)) "first render: no LF"
+        let r2 = (live-build-panel-bytes $frame 0 120)
+        assert (not ($r2.bytes | str contains $lf)) "re-anchor at new width: no LF"
+        assert-equal $r1.owned $r2.owned "owned matches after re-anchor"
+    })
+    (test "completion receipt renders inside alternate screen" {
+        let lf = (char --integer 10)
+        let esc = (char --integer 27)
+        let state = {active: [{title: "Job", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 60, closeout_at: (date now), deadline_at: (date now)}], queued: 0, free: 2, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let r1 = (live-build-panel-bytes $frame 0 80)
+        mut receipt_buf = ""
+        let receipt = "DONE · Test Job · alice/repo · mimo/standard · 1m 00s · 3 files"
+        $receipt_buf = $"($receipt_buf)($esc)[H($esc)[2K($receipt)($esc)[1B"
+        assert (not ($receipt_buf | str contains $lf)) "receipt: no LF"
+        let r2 = (live-build-panel-bytes $frame 0 80)
+        assert (not ($r2.bytes | str contains $lf)) "panel after receipt: no LF"
+    })
+    (test "redirected mode output has no alternate screen or ANSI escape bytes" {
+        let zero_state = (live-panel-state [] 3 0)
+        let frame = (live-panel-frame $zero_state)
+        let text = ($frame | str join "\n")
+        let esc = (char --integer 27)
+        assert (not ($text | str contains $esc)) "no ANSI in redirected frame text"
+        assert (not ($text | str contains $"($esc)[?1049h")) "no alternate screen in redirected text"
+    })
+    (test "production bytes from live-render-panel use home positioning" {
+        let lf = (char --integer 10)
+        let esc = (char --integer 27)
+        let state = {active: [{title: "Test Job", profile: "MiMo Pro", phase: "WORKING", elapsed_seconds: 120, closeout_at: (date now), deadline_at: (date now)}], queued: 1, free: 2, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let result = (live-build-panel-bytes $frame 0 80)
+        assert (not ($result.bytes | str contains $lf)) "live-render bytes: no LF"
+        assert ($result.bytes | str contains $"($esc)[H") "live-render uses home"
+        let result2 = (live-build-panel-bytes $frame $result.owned 80)
+        assert (not ($result2.bytes | str contains $lf)) "live-render redraw bytes: no LF"
+        assert ($result2.bytes | str contains $"($esc)[H") "live-render redraw uses home"
+    })
+    (test "stable panel identity invariant: 100 identical frames produce identical bytes" {
+        let state = {active: [{title: "Test Job", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 120, closeout_at: (date now), deadline_at: (date now)}], queued: 1, free: 2, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let first_result = (live-build-panel-bytes $frame 0 80)
+        for i in 0..99 {
+            let result = (live-build-panel-bytes $frame 0 80)
+            assert-equal $result.bytes $first_result.bytes $"refresh ($i): identical bytes"
+            assert-equal $result.owned $first_result.owned $"refresh ($i): identical owned"
+        }
+    })
+    (test "long title cannot auto-wrap in narrow terminal" {
+        let now = (date now)
+        let long_title = ("A" | fill -a right -w 200 -c 'A')
+        let job = {title: $long_title, profile: "MiMo Pro", phase: "WORKING", elapsed_seconds: 100, closeout_at: $now, deadline_at: ($now + 60sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now}
+        let frame = (live-panel-frame $state)
+        let result = (live-build-panel-bytes $frame 0 40)
+        for line in $frame {
+            let truncated = (truncate-line $line 40)
+            assert (($truncated | split chars | length) <= 40) $"line bounded to 40: ($truncated)"
+        }
+    })
     })
 ]
 
