@@ -670,53 +670,58 @@ def live-panel-frame [state: record] {
     $lines
 }
 
-def live-build-panel-bytes [frame: list<string> previous_lines: int] {
+def truncate-line [line: string width: int] {
+    if $width <= 0 { "" } else {
+        let chars = ($line | split chars)
+        let char_count = ($chars | length)
+        if $char_count <= $width { $line } else { ($chars | first ($width - 1) | str join) + "…" }
+    }
+}
+
+def live-build-panel-bytes [frame: list<string> owned: int width: int = 0] {
     let esc = (char --integer 27)
+    let actual_width = (if $width > 0 { $width } else { try { (term size).columns } catch { 80 } })
     let new_count = ($frame | length)
     mut buf = ""
-    if $previous_lines > 1 { $buf = $"($esc)[($previous_lines - 1)A" }
+    $buf = $"($buf)($esc)[s"
     let last_idx = ($new_count - 1)
     mut i = 0
     for line in $frame {
+        let truncated = (truncate-line $line $actual_width)
         if $i < $last_idx {
-            $buf = $"($buf)\r($esc)[2K($line)($esc)[1B"
+            $buf = $"($buf)\r($esc)[2K($truncated)($esc)[1B"
         } else {
-            $buf = $"($buf)\r($esc)[2K($line)"
+            $buf = $"($buf)\r($esc)[2K($truncated)"
         }
         $i = $i + 1
     }
-    if $previous_lines > $new_count {
-        let extra = ($previous_lines - $new_count)
-        for _ in 0..<$extra { $buf = $"($buf)($esc)[1B\r($esc)[2K" }
-        if $extra > 0 { $buf = $"($buf)($esc)[($extra)A" }
-    }
+    if $new_count > 1 { $buf = $"($buf)($esc)[($new_count - 1)A" }
     {bytes: $buf, owned: $new_count}
 }
 
-def live-render-panel [frame: list<string> previous_lines: int] {
-    let result = (live-build-panel-bytes $frame $previous_lines)
+def live-render-panel [frame: list<string> owned: int width: int = 0] {
+    let result = (live-build-panel-bytes $frame $owned $width)
     print -n --stderr $result.bytes
     $result.owned
 }
 
-def live-build-clear-bytes [previous_lines: int] {
-    if $previous_lines <= 0 {
+def live-build-clear-bytes [owned: int] {
+    if $owned <= 0 {
         {bytes: "", owned: 0}
     } else {
         let esc = (char --integer 27)
-        mut buf = ""
-        if $previous_lines > 1 { $buf = $"($esc)[($previous_lines - 1)A" }
-        for i in 0..<$previous_lines {
+        mut buf = $"($esc)[s"
+        for i in 0..<$owned {
             $buf = $"($buf)\r($esc)[2K"
-            if ($i + 1) < $previous_lines { $buf = $"($buf)($esc)[1B" }
+            if ($i + 1) < $owned { $buf = $"($buf)($esc)[1B" }
         }
-        $buf = $"($buf)($esc)[?25h"
+        $buf = $"($buf)($esc)[u($esc)[?25h"
         {bytes: $buf, owned: 0}
     }
 }
 
-def live-clear-panel [previous_lines: int] {
-    let result = (live-build-clear-bytes $previous_lines)
+def live-clear-panel [owned: int] {
+    let result = (live-build-clear-bytes $owned)
     if ($result.bytes | is-not-empty) { print -n --stderr $result.bytes }
 }
 
@@ -2057,7 +2062,8 @@ def watch-command [args: list<string>] {
     mut queued_count = 0
     mut last_poll_at = ((date now) - 20sec)
     mut last_panel_render_at = ((date now) - 10sec)
-    mut panel_lines = 0
+    mut panel_owned = 0
+    mut panel_width = 0
     mut pending_receipts = []
     let running_identity = (running-runtime-identity)
     mut stale_detected = false
@@ -2411,12 +2417,17 @@ def watch-command [args: list<string>] {
             }
             let render_now = (date now)
             let render_elapsed = (((($render_now - $last_panel_render_at) | into int) / 1000000000) | math round | into int)
-            if $tty_on and ($render_elapsed >= 6 or $panel_lines == 0) {
+            let current_width = (try { (term size).columns } catch { 80 })
+            let width_changed = ($current_width != $panel_width)
+            if $width_changed and ($panel_width > 0) {
+                $panel_owned = 0
+            }
+            if $tty_on and ($render_elapsed >= 6 or $panel_owned == 0) {
                 if ($pending_receipts | is-not-empty) {
-                    if $panel_lines > 0 {
-                        let clear_result = (live-build-clear-bytes $panel_lines)
+                    if $panel_owned > 0 {
+                        let clear_result = (live-build-clear-bytes $panel_owned)
                         if ($clear_result.bytes | is-not-empty) { print -n --stderr $clear_result.bytes }
-                        $panel_lines = 0
+                        $panel_owned = 0
                     }
                     let esc = (char --integer 27)
                     mut receipt_buf = ""
@@ -2426,7 +2437,8 @@ def watch-command [args: list<string>] {
                 }
                 let state = (live-panel-state $active_jobs $max_slots $queued_count $stale_detected $stale_installed_version)
                 let frame = (live-panel-frame $state)
-                $panel_lines = (live-render-panel $frame $panel_lines)
+                $panel_width = $current_width
+                $panel_owned = (live-render-panel $frame $panel_owned $panel_width)
                 $last_panel_render_at = $render_now
             }
             if ($once or $check) and ($active_jobs | is-empty) { break }
@@ -2462,7 +2474,7 @@ def watch-command [args: list<string>] {
         }
         controller-raise-watch-error $err
     }
-    if $tty_on { live-clear-panel $panel_lines }
+    if $tty_on { live-clear-panel $panel_owned }
     controller-release-lock
     print "Watch stopped."
 }

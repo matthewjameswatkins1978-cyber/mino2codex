@@ -2826,7 +2826,7 @@ let results = [
             assert (($line | describe) == "string") "each line is a string"
         }
     })
-    # --- live panel: version value is 0.2.5 ---
+    # --- live panel: version value is 0.2.6 ---
     (test "version-value returns 0.2.6" {
         assert-equal (version-value) "0.2.6" "version bumped"
     })
@@ -2957,79 +2957,77 @@ let results = [
         }
     })
     # --- live panel redraw: cursor math correctness ---
-    (test "live-build-panel-bytes first render has no cursor-up" {
+    (test "live-build-panel-bytes first render has save cursor and no initial cursor-up" {
         let esc = (char --integer 27)
         let frame = ["header" "" "footer"]
-        let result = (live-build-panel-bytes $frame 0)
-        let has_cu_a = ($result.bytes | str contains $"($esc)[1A")
-        let has_cu_2a = ($result.bytes | str contains $"($esc)[2A")
-        let has_cu_3a = ($result.bytes | str contains $"($esc)[3A")
-        assert (not $has_cu_a) "no cursor-up 1 in first render"
-        assert (not $has_cu_2a) "no cursor-up 2 in first render"
-        assert (not $has_cu_3a) "no cursor-up 3 in first render"
+        let result = (live-build-panel-bytes $frame 0 80)
+        assert ($result.bytes | str contains $"($esc)[s") "save cursor present"
+        assert (not ($result.bytes | str contains $"($esc)[1A")) "no cursor-up at start"
         assert-equal $result.owned 3 "owned matches frame length"
     })
-    (test "live-build-panel-bytes second render uses cursor-up previous_lines minus 1" {
+    (test "live-build-panel-bytes second render saves and restores cursor" {
         let esc = (char --integer 27)
         let frame = ["header" "" "footer"]
-        let first = (live-build-panel-bytes $frame 0)
-        let second = (live-build-panel-bytes $frame $first.owned)
-        assert ($second.bytes | str contains $"($esc)[2A") "cursor-up (owned-1)=2 present"
+        let first = (live-build-panel-bytes $frame 0 80)
+        let second = (live-build-panel-bytes $frame $first.owned 80)
+        assert ($second.bytes | str contains $"($esc)[s") "save cursor present in redraw"
+        assert ($second.bytes | str contains $"($esc)[2K") "clear-line present"
         assert-equal $second.owned 3 "owned stable"
     })
     (test "live-build-panel-bytes N refreshes keep same owned count" {
         let frame = ["header" "" "line1" "line2" "footer"]
         mut owned = 0
         for i in 0..5 {
-            let result = (live-build-panel-bytes $frame $owned)
+            let result = (live-build-panel-bytes $frame $owned 80)
             $owned = $result.owned
         }
         assert-equal $owned 5 "owned remains 5 after 6 refreshes"
     })
     (test "live-build-panel-bytes output contains no line feed bytes" {
         let frame = ["line1" "line2" "line3"]
-        let result = (live-build-panel-bytes $frame 0)
+        let result = (live-build-panel-bytes $frame 0 80)
         let lf = (char --integer 10)
         assert (not ($result.bytes | str contains $lf)) "no LF byte that causes scroll"
     })
     (test "live-build-panel-bytes redraw contains no line feed bytes" {
         let frame = ["line1" "line2" "line3"]
-        let first = (live-build-panel-bytes $frame 0)
-        let second = (live-build-panel-bytes $frame $first.owned)
+        let first = (live-build-panel-bytes $frame 0 80)
+        let second = (live-build-panel-bytes $frame $first.owned 80)
         let lf = (char --integer 10)
         assert (not ($second.bytes | str contains $lf)) "no LF in redraw"
     })
     (test "live-build-panel-bytes uses cursor-down sequences for inter-line movement" {
         let esc = (char --integer 27)
         let frame = ["line1" "line2" "line3"]
-        let result = (live-build-panel-bytes $frame 0)
+        let result = (live-build-panel-bytes $frame 0 80)
         assert ($result.bytes | str contains $"($esc)[1B") "cursor-down present for inter-line movement"
     })
-    (test "live-build-panel-bytes cursor-up count is previous_lines minus 1" {
+    (test "live-build-panel-bytes trailing cursor-up restores to anchor" {
         let esc = (char --integer 27)
         let frame = ["a" "b" "c" "d"]
-        let result = (live-build-panel-bytes $frame 4)
-        assert ($result.bytes | str contains $"($esc)[3A") "cursor-up (4-1)=3 for 4 previous lines"
+        let result = (live-build-panel-bytes $frame 0 80)
+        assert ($result.bytes | str contains $"($esc)[3A") "trailing cursor-up (count-1)=3 restores to anchor"
     })
-    (test "live-build-panel-bytes shrinking frame clears extra lines" {
+    (test "live-build-panel-bytes shrinking frame still saves and clears" {
         let esc = (char --integer 27)
         let big_frame = ["a" "b" "c" "d" "e"]
         let small_frame = ["a" "b"]
-        let first = (live-build-panel-bytes $big_frame 0)
-        let second = (live-build-panel-bytes $small_frame $first.owned)
+        let first = (live-build-panel-bytes $big_frame 0 80)
+        let second = (live-build-panel-bytes $small_frame $first.owned 80)
+        assert ($second.bytes | str contains $"($esc)[s") "save cursor present"
         assert ($second.bytes | str contains $"($esc)[2K") "clear-line present"
-        assert ($second.bytes | str contains $"($esc)[4A") "cursor-up (5-1)=4 for extra line handling"
         assert-equal $second.owned 2 "owned shrinks to 2"
     })
-    (test "live-build-clear-bytes returns empty for zero previous_lines" {
+    (test "live-build-clear-bytes returns empty for zero owned" {
         let result = (live-build-clear-bytes 0)
         assert-equal $result.bytes "" "empty bytes"
         assert-equal $result.owned 0 "owned is 0"
     })
-    (test "live-build-clear-bytes uses cursor-up previous_lines minus 1" {
+    (test "live-build-clear-bytes uses save and restore cursor" {
         let esc = (char --integer 27)
         let result = (live-build-clear-bytes 5)
-        assert ($result.bytes | str contains $"($esc)[4A") "cursor-up (5-1)=4"
+        assert ($result.bytes | str contains $"($esc)[s") "save cursor present"
+        assert ($result.bytes | str contains $"($esc)[u") "restore cursor present"
         assert ($result.bytes | str contains $"($esc)[?25h") "cursor visible"
         assert-equal $result.owned 0 "owned is 0 after clear"
     })
@@ -3040,8 +3038,8 @@ let results = [
     })
     (test "two identical renders produce no extra line feed overhead" {
         let frame = ["header" "" "footer"]
-        let first = (live-build-panel-bytes $frame 0)
-        let second = (live-build-panel-bytes $frame $first.owned)
+        let first = (live-build-panel-bytes $frame 0 80)
+        let second = (live-build-panel-bytes $frame $first.owned 80)
         let lf = (char --integer 10)
         assert (not ($first.bytes | str contains $lf)) "first render: no LF"
         assert (not ($second.bytes | str contains $lf)) "second render: no LF"
@@ -3049,9 +3047,9 @@ let results = [
     })
     (test "zero-active to one-active transition does not creep downward" {
         let zero_frame = (live-panel-frame {active: [], queued: 0, free: 3, max_slots: 3, now: (date now)})
-        let zero_result = (live-build-panel-bytes $zero_frame 0)
+        let zero_result = (live-build-panel-bytes $zero_frame 0 80)
         let one_frame = (live-panel-frame {active: [{title: "J", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 10, closeout_at: (date now), deadline_at: (date now)}], queued: 0, free: 2, max_slots: 3, now: (date now)})
-        let one_result = (live-build-panel-bytes $one_frame $zero_result.owned)
+        let one_result = (live-build-panel-bytes $one_frame $zero_result.owned 80)
         assert ($one_result.owned > $zero_result.owned) "panel grows"
         let lf = (char --integer 10)
         assert (not ($one_result.bytes | str contains $lf)) "no LF in transition bytes"
@@ -3061,6 +3059,123 @@ let results = [
         let frame = (live-panel-frame $zero_state)
         let text = ($frame | str join "\n")
         assert (not ($text | str contains (char --integer 27))) "no ANSI in redirected frame text"
+    })
+    # === terminal state model tests ===
+    (test "truncate-line shortens long lines with ellipsis" {
+        assert-equal (truncate-line "hello" 3) "he…" "truncated with ellipsis"
+        assert-equal (truncate-line "hi" 10) "hi" "short line unchanged"
+        assert-equal (truncate-line "" 5) "" "empty line unchanged"
+        assert-equal (truncate-line "12345" 5) "12345" "exact width unchanged"
+        assert-equal (truncate-line "123456" 5) "1234…" "over width truncated"
+        let header = "m2c 0.2.6 · watching · 1 active · 0 queued"
+        let truncated = (truncate-line $header 40)
+        assert-equal ($truncated | split chars | length) 40 "header truncated to exactly width"
+    })
+    (test "live-build-panel-bytes no LF in any frame" {
+        let lf = (char --integer 10)
+        let state1 = {active: [], queued: 0, free: 3, max_slots: 3, now: (date now)}
+        let frame1 = (live-panel-frame $state1)
+        let r1 = (live-build-panel-bytes $frame1 0 80)
+        assert (not ($r1.bytes | str contains $lf)) "empty panel: no LF"
+        let now = (date now)
+        let state2 = {active: [{title: "Fix auth bug", profile: "MiMo Pro", phase: "WORKING", elapsed_seconds: 738, closeout_at: ($now + 600sec), deadline_at: ($now + 900sec)}], queued: 2, free: 2, max_slots: 3, now: $now}
+        let frame2 = (live-panel-frame $state2)
+        let r2 = (live-build-panel-bytes $frame2 0 80)
+        assert (not ($r2.bytes | str contains $lf)) "one-active panel: no LF"
+        let r3 = (live-build-panel-bytes $frame2 $r2.owned 80)
+        assert (not ($r3.bytes | str contains $lf)) "one-active redraw: no LF"
+        let state3 = {active: [
+            {title: "Job A", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 60, closeout_at: $now, deadline_at: $now}
+            {title: "Job B", profile: "MiMo Pro", phase: "CLOSEOUT", elapsed_seconds: 900, closeout_at: $now, deadline_at: $now}
+            {title: "Job C", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 30, closeout_at: $now, deadline_at: $now}
+        ], queued: 5, free: 0, max_slots: 3, now: $now}
+        let frame3 = (live-panel-frame $state3)
+        let r4 = (live-build-panel-bytes $frame3 0 80)
+        assert (not ($r4.bytes | str contains $lf)) "three-active panel: no LF"
+        let r5 = (live-build-panel-bytes $frame3 $r4.owned 80)
+        assert (not ($r5.bytes | str contains $lf)) "three-active redraw: no LF"
+    })
+    (test "100 identical refreshes produce zero scrollback growth" {
+        let state = {active: [{title: "Fix auth bug", profile: "MiMo Pro", phase: "WORKING", elapsed_seconds: 300, closeout_at: (date now), deadline_at: (date now)}], queued: 1, free: 2, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let lf = (char --integer 10)
+        mut owned = 0
+        for i in 0..99 {
+            let result = (live-build-panel-bytes $frame $owned 80)
+            assert (not ($result.bytes | str contains $lf)) $"refresh ($i): no LF byte"
+            $owned = $result.owned
+        }
+        assert-equal $owned ($frame | length) "owned matches frame after 100 refreshes"
+    })
+    (test "zero -> one -> three -> one -> zero transitions produce no LF" {
+        let lf = (char --integer 10)
+        let now = (date now)
+        let mkjob = {|t| {title: $t, profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 10, closeout_at: $now, deadline_at: $now} }
+        let s0 = {active: [], queued: 0, free: 3, max_slots: 3, now: $now}
+        let s1 = {active: [(do $mkjob "A")], queued: 0, free: 2, max_slots: 3, now: $now}
+        let s3 = {active: [(do $mkjob "A") (do $mkjob "B") (do $mkjob "C")], queued: 0, free: 0, max_slots: 3, now: $now}
+        let transitions = [$s0 $s1 $s3 $s1 $s0]
+        let num_transitions = ($transitions | length)
+        mut owned = 0
+        for i in 0..<($num_transitions) {
+            let frame = (live-panel-frame ($transitions | get $i))
+            let result = (live-build-panel-bytes $frame $owned 80)
+            assert (not ($result.bytes | str contains $lf)) $"transition ($i): no LF"
+            $owned = $result.owned
+        }
+    })
+    (test "narrow terminal truncates long lines with ellipsis" {
+        let now = (date now)
+        let long_title = ("A" | fill -a right -w 100 -c 'A')
+        let job = {title: $long_title, profile: "MiMo Pro", phase: "WORKING", elapsed_seconds: 100, closeout_at: $now, deadline_at: ($now + 60sec)}
+        let state = {active: [$job], queued: 0, free: 2, max_slots: 3, now: $now}
+        let frame = (live-panel-frame $state)
+        let result = (live-build-panel-bytes $frame 0 40)
+        for line in $frame {
+            let truncated = (truncate-line $line 40)
+            assert (($truncated | split chars | length) <= 40) $"line truncated to 40: ($truncated)"
+        }
+        assert-equal $result.owned ($frame | length) "owned matches frame length"
+    })
+    (test "terminal resize: panel re-anchors without creep" {
+        let lf = (char --integer 10)
+        let state = {active: [{title: "Job", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 60, closeout_at: (date now), deadline_at: (date now)}], queued: 0, free: 2, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let r1 = (live-build-panel-bytes $frame 0 80)
+        assert (not ($r1.bytes | str contains $lf)) "first render: no LF"
+        let r2 = (live-build-panel-bytes $frame 0 120)
+        assert (not ($r2.bytes | str contains $lf)) "re-anchor at new width: no LF"
+        assert-equal $r1.owned $r2.owned "owned matches after re-anchor"
+    })
+    (test "completion receipt does not add scrollback" {
+        let lf = (char --integer 10)
+        let esc = (char --integer 27)
+        let state = {active: [{title: "Job", profile: "MiMo Standard", phase: "WORKING", elapsed_seconds: 60, closeout_at: (date now), deadline_at: (date now)}], queued: 0, free: 2, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let r1 = (live-build-panel-bytes $frame 0 80)
+        mut receipt_buf = ""
+        let receipt = "DONE · Test Job · alice/repo · mimo/standard · 1m 00s · 3 files"
+        $receipt_buf = $"($receipt_buf)($receipt)\r($esc)[1B"
+        assert (not ($receipt_buf | str contains $lf)) "receipt: no LF"
+        let r2 = (live-build-panel-bytes $frame 0 80)
+        assert (not ($r2.bytes | str contains $lf)) "panel after receipt: no LF"
+    })
+    (test "clear leaves cursor below owned region" {
+        let esc = (char --integer 27)
+        let result = (live-build-clear-bytes 5)
+        assert ($result.bytes | str contains $"($esc)[s") "save cursor"
+        assert ($result.bytes | str contains $"($esc)[u") "restore cursor"
+        assert ($result.bytes | str contains $"($esc)[?25h") "cursor visible"
+        assert-equal $result.owned 0 "owned is 0"
+    })
+    (test "production bytes from live-render-panel contain no LF" {
+        let lf = (char --integer 10)
+        let state = {active: [{title: "Test Job", profile: "MiMo Pro", phase: "WORKING", elapsed_seconds: 120, closeout_at: (date now), deadline_at: (date now)}], queued: 1, free: 2, max_slots: 3, now: (date now)}
+        let frame = (live-panel-frame $state)
+        let result = (live-build-panel-bytes $frame 0 80)
+        assert (not ($result.bytes | str contains $lf)) "live-render bytes: no LF"
+        let result2 = (live-build-panel-bytes $frame $result.owned 80)
+        assert (not ($result2.bytes | str contains $lf)) "live-render redraw bytes: no LF"
     })
     # === branch preparation regression tests (fix sequential same-branch continuation) ===
     # test 1: no remote target branch => starts exactly at declared base
