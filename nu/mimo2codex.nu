@@ -30,7 +30,7 @@ def skill-path [] { skill-root | path join "mimo-worker" | path join "SKILL.md" 
 def catalogue-path [] { state-root | path join "codex-home" | path join "model-catalogs" | path join "model-catalogs.json" }
 def provider-data [] { open (config-path "mimo.json") }
 def catalogue-data [] { open (config-path "model-catalogs.json") }
-def required-models [] { let data = (provider-data); [$data.models.standard $data.models.pro] }
+def required-models [] { let data = (provider-data); [$data.models.standard $data.models.pro $data.models.ultraspeed] }
 
 def valid-key [value: string] {
     let key = ($value | str trim)
@@ -111,6 +111,7 @@ def model-records [] {
     [
         {alias: "standard", model: $data.models.standard}
         {alias: "pro", model: $data.models.pro}
+        {alias: "ultraspeed", model: $data.models.ultraspeed}
     ] | each {|row|
         let detail = ($catalogue | where slug == $row.model | first)
         {alias: $row.alias, model: $row.model, reasoning: (if $detail.supports_reasoning_summaries { "yes" } else { "no" })}
@@ -235,7 +236,8 @@ def worker-provider-id [] { "m2c-mimo" }
 
 def worker-dispatch [worker: string profile: string prompt: string workstream: any packet: any session_id: any quiet: bool agent: string fork: bool cwd: path budget_minutes: int] {
     if $worker != "mimo" { error make {msg: $"unknown worker: ($worker); only mimo is supported"} }
-    let model_id = (if $profile == "pro" { (provider-data).models.pro } else { (provider-data).models.standard })
+    let data = (provider-data)
+    let model_id = (if $profile == "pro" { $data.models.pro } else if $profile == "ultraspeed" { $data.models.ultraspeed } else { $data.models.standard })
     worker-run $model_id $prompt $workstream $packet $session_id $quiet $agent $fork $cwd $budget_minutes
 }
 def worker-model [model: string] { $"(worker-provider-id)/($model)" }
@@ -269,13 +271,17 @@ def worker-config [machine: bool = true] {
                     apiKey: "{env:MIMO_API_KEY}"
                 }
                 models: {
-                    "mimo-v2.5": {
-                        name: "mimo-v2.5"
+                    "mimo-v2.6-flash": {
+                        name: "mimo-v2.6-flash"
                         limit: {context: 1048576, output: 131072}
-                        modalities: {input: [text, image], output: [text]}
+                        modalities: {input: [text, image, audio, video], output: [text]}
                     }
-                    "mimo-v2.5-pro": {
-                        name: "mimo-v2.5-pro"
+                    "mimo-v2.6-pro": {
+                        name: "mimo-v2.6-pro"
+                        limit: {context: 1048576, output: 131072}
+                    }
+                    "mimo-v2.6-pro-ultraspeed": {
+                        name: "mimo-v2.6-pro-ultraspeed"
                         limit: {context: 1048576, output: 131072}
                     }
                 }
@@ -421,7 +427,10 @@ def checkpoint-state [state: record] {
 def parse-worker-events [raw: string] {
     $raw | lines | each {|line|
         let parsed = (try { $line | from json } catch { null })
-        if (($parsed | describe | str starts-with "record<")) { $parsed } else { null }
+        if $parsed == null { null } else {
+            let kind = ($parsed | describe)
+            if ($kind | str starts-with "record<") { $parsed } else { null }
+        }
     } | where {|item| $item != null }
 }
 
@@ -507,8 +516,9 @@ def telemetry-derived [events: list<any> started: any ended: any] {
 }
 
 def activity-from-event [event: any] {
-    let tool = ($event.part.tool? | default "" | str lowercase)
-    let input = ($event.part.state?.input? | default {})
+    let part = ($event.part? | default {})
+    let tool = ($part.tool? | default "" | str lowercase)
+    let input = ($part.state?.input? | default {})
     let command = ([$input.command? $input.cmd?] | where {|value| $value != null} | first | default "" | str lowercase)
     if $tool in ["read", "glob", "grep", "search", "list"] { "Inspecting project files" } else if $tool in ["edit", "write", "patch"] { "Updating project files" } else if ($command | str contains "test") or ($command | str contains "pytest") { "Running verification tests" } else if ($command | str contains "cargo") { "Building or checking Rust" } else if ($command | str contains "dune") or ($command | str contains "ocaml") { "Building or checking OCaml" } else if ($command | str contains "git") { "Reviewing changes" } else if ($command | str contains "checksum") or ($command | str contains "archive") { "Packaging release" } else if $event.type == "step_start" { "Working..." } else { "Working..." }
 }
@@ -683,7 +693,7 @@ def live-build-panel-bytes [frame: list<string> owned: int width: int = 0] {
     let actual_width = (if $width > 0 { $width } else { try { (term size).columns } catch { 80 } })
     let new_count = ($frame | length)
     mut buf = ""
-    $buf = $"($buf)($esc)[s"
+    $buf = $"($buf)($esc)[H"
     let last_idx = ($new_count - 1)
     mut i = 0
     for line in $frame {
@@ -710,12 +720,12 @@ def live-build-clear-bytes [owned: int] {
         {bytes: "", owned: 0}
     } else {
         let esc = (char --integer 27)
-        mut buf = $"($esc)[s"
+        mut buf = ""
         for i in 0..<$owned {
             $buf = $"($buf)\r($esc)[2K"
             if ($i + 1) < $owned { $buf = $"($buf)($esc)[1B" }
         }
-        $buf = $"($buf)($esc)[u($esc)[?25h"
+        $buf = $"($buf)($esc)[?25h($esc)[?1049l"
         {bytes: $buf, owned: 0}
     }
 }
@@ -987,7 +997,7 @@ def packet-command [model: string args: list<string>] {
     if ($parsed.packet == null) and ($packet != null) { $forwarded = ($forwarded | append ["--packet" $packet] | flatten) }
     $forwarded = ($forwarded | append $details.content)
     let agent = (worker-agent $details.content)
-    print --stderr $"Packet       ($details.file | path basename)\nWorkstream   (if ($workstream == null) { "(none inferred)" } else { $workstream })\nPacket ID    (if ($packet == null) { "(none inferred)" } else { $packet })\nModel        (if $model == "mimo-v2.5" { "standard" } else { "pro" })\nAgent        ($agent)\nDirectory    (pwd | path expand)"
+    print --stderr $"Packet       ($details.file | path basename)\nWorkstream   (if ($workstream == null) { "(none inferred)" } else { $workstream })\nPacket ID    (if ($packet == null) { "(none inferred)" } else { $packet })\nModel        (if $model == (provider-data).models.standard { "standard / Flash" } else if $model == (provider-data).models.ultraspeed { "ultraspeed" } else { "pro" })\nAgent        ($agent)\nDirectory    (pwd | path expand)"
     run-worker-command $model $forwarded
 }
 
@@ -1076,12 +1086,14 @@ def print-help [] {
     print "  m2c                         launch the MiMo OpenCode worker interactively"
     print "  m2c pro                     launch the Pro worker interactively"
     print "  m2c standard                launch the standard worker interactively"
+    print "  m2c ultraspeed              launch the latency-sensitive Pro worker"
     print "  m2c run \"task\"             run one bounded machine worker packet"
     print "  m2c run --json \"task\"      emit the stable JSON result envelope"
     print "  m2c run --quiet --json \"task\"  suppress the live console"
     print "  m2c run --workstream NAME --packet ID \"task\"  continue bounded work"
     print "  m2c packet FILE             run a Standard packet file"
     print "  m2c standard packet FILE    run a Standard packet file"
+    print "  m2c ultraspeed packet FILE  run an UltraSpeed packet file"
     print "  m2c pro packet FILE         run a Pro packet file"
     print "  m2c models                  list supported models"
     print "  m2c setup                   install/repair isolated MiMo configuration"
@@ -1160,8 +1172,9 @@ def doctor [args: list<string> = []] {
         (check-row "Isolated CODEX_HOME" (if (state-root | path join "codex-home" | path exists) { "PASS" } else { "FAIL" }) (state-root | path join "codex-home"))
         (check-row "MiMo config.toml" (if ($config | path exists) { "PASS" } else { "FAIL" }) $config)
         (check-row "Model catalogue" (if (($catalogue_path | path exists) and $catalog_ok) { "PASS" } else { "FAIL" }) $catalogue_path)
-        (check-row "mimo-v2.5" (if ($catalog_ok and ((required-models).0 in ((catalogue-data).models | get slug))) { "PASS" } else { "FAIL" }) "required model")
-        (check-row "mimo-v2.5-pro" (if ($catalog_ok and ((required-models).1 in ((catalogue-data).models | get slug))) { "PASS" } else { "FAIL" }) "required model")
+        (check-row "mimo-v2.6-flash" (if ($catalog_ok and ((required-models).0 in ((catalogue-data).models | get slug))) { "PASS" } else { "FAIL" }) "required model")
+        (check-row "mimo-v2.6-pro" (if ($catalog_ok and ((required-models).1 in ((catalogue-data).models | get slug))) { "PASS" } else { "FAIL" }) "required model")
+        (check-row "mimo-v2.6-pro-ultraspeed" (if ($catalog_ok and ((required-models).2 in ((catalogue-data).models | get slug))) { "PASS" } else { "FAIL" }) "required model")
         (check-row "Credential" $credential.status $credential.source)
         (check-row "Credential format" (if $credential.status == "configured" { "PASS" } else { "FAIL" }) "Token Plan prefix tp-")
         (check-row "Endpoint" (if $provider.endpoint == "https://token-plan-ams.xiaomimimo.com/v1" { "PASS" } else { "FAIL" }) $provider.endpoint)
@@ -1204,8 +1217,9 @@ MiMo configuration ... installing"
         print "Credential stored locally."
     } else { print "Credential already configured; leaving it unchanged." }
     print "Testing configuration..."
-    print (mimo2codex-model-line "mimo-v2.5")
-    print (mimo2codex-model-line "mimo-v2.5-pro")
+    print (mimo2codex-model-line (provider-data).models.standard)
+    print (mimo2codex-model-line (provider-data).models.pro)
+    print (mimo2codex-model-line (provider-data).models.ultraspeed)
     print $"Worker skill ........ ($skill)"
     print ""
     print "Ready."
@@ -1395,8 +1409,10 @@ def validate-depends-on [deps: list<int> issue_number: int repo: string] {
     }
 }
 
+def watch-m2c-done-title [] { "[M2C DONE]" }
+
 def watch-dependency-terminal-success [state: string title: string] {
-    (($state | str lowercase) == "closed") and ($title | str starts-with "[M2C DONE]")
+    ($title | str starts-with (watch-m2c-done-title))
 }
 
 def watch-check-dep-issue [repo: string dep_number: int] {
@@ -1410,9 +1426,9 @@ def watch-check-dep-issue [repo: string dep_number: int] {
             if (watch-dependency-terminal-success $state $title) {
                 {satisfied: true, reason: "", exists: true}
             } else if ($state == "open") {
-                {satisfied: false, reason: $"issue #($dep_str) is open (title: ($title))", exists: true}
+                {satisfied: false, reason: $"issue #($dep_str) is open without DONE title (title: ($title))", exists: true}
             } else if ($state == "closed") {
-                {satisfied: false, reason: $"issue #($dep_str) is closed but not DONE (title: ($title))", exists: true}
+                {satisfied: false, reason: $"issue #($dep_str) is closed without DONE title (title: ($title))", exists: true}
             } else {
                 {satisfied: false, reason: $"issue #($dep_str) state: ($state)", exists: true}
             }
@@ -1469,7 +1485,7 @@ def watch-validate-packet [fm: record] {
                 let model_str = ($fm | get -o "model" | default "")
                 let parsed_model = (if ($model_str | is-not-empty) { watch-parse-model $model_str } else { null })
                 let has_explicit_model = ($model_str | is-not-empty)
-                if $has_explicit_model and ($parsed_model == null) { {ok: false, reason: $"invalid model ($model_str); must be standard or pro"} } else {
+                if $has_explicit_model and ($parsed_model == null) { {ok: false, reason: $"invalid model ($model_str); must be standard, pro, or ultraspeed"} } else {
                     let worker_str = ($fm | get -o "worker" | default "mimo" | str trim)
                     if ($worker_str != "mimo") { {ok: false, reason: $"unknown worker: ($worker_str); only mimo is supported"} } else {
                         let profile = ($parsed_model | default "standard")
@@ -1503,7 +1519,7 @@ def watch-gh-find-job [login: string] {
 
 def watch-parse-model [value: string] {
     let trimmed = ($value | str trim | str trim --char '"')
-    if $trimmed in ["standard", "pro"] { $trimmed } else { null }
+    if $trimmed in ["standard", "pro", "ultraspeed"] { $trimmed } else { null }
 }
 
 def watch-normalize-frontmatter [fm: record] {
@@ -2071,7 +2087,7 @@ def watch-command [args: list<string>] {
     mut stale_installed_version = ""
     if $tty_on {
         let esc = (char --integer 27)
-        print -n --stderr $"($esc)[?25l"
+        print -n --stderr $"($esc)[?1049h($esc)[?25l"
     }
     try {
         while true {
@@ -2424,14 +2440,12 @@ def watch-command [args: list<string>] {
             }
             if $tty_on and ($render_elapsed >= 6 or $panel_owned == 0) {
                 if ($pending_receipts | is-not-empty) {
-                    if $panel_owned > 0 {
-                        let clear_result = (live-build-clear-bytes $panel_owned)
-                        if ($clear_result.bytes | is-not-empty) { print -n --stderr $clear_result.bytes }
-                        $panel_owned = 0
-                    }
                     let esc = (char --integer 27)
                     mut receipt_buf = ""
-                    for receipt in $pending_receipts { $receipt_buf = $"($receipt_buf)($receipt)\r($esc)[1B" }
+                    for receipt in $pending_receipts {
+                        let truncated = (truncate-line $receipt $panel_width)
+                        $receipt_buf = $"($receipt_buf)($esc)[H($esc)[2K($truncated)($esc)[1B"
+                    }
                     print -n --stderr $receipt_buf
                     $pending_receipts = []
                 }
@@ -2466,7 +2480,7 @@ def watch-command [args: list<string>] {
         let err_msg = ($err.msg? | default "watch error")
         let err_detail = (try { $err | to json -r } catch { "" })
         let esc = (char --integer 27)
-        print -n --stderr $"($esc)[?25h"
+        print -n --stderr $"($esc)[?25h($esc)[?1049l"
         controller-release-lock
         print --stderr $"Watch error: ($err_msg)"
         if ($err_detail | is-not-empty) {
@@ -2474,7 +2488,13 @@ def watch-command [args: list<string>] {
         }
         controller-raise-watch-error $err
     }
-    if $tty_on { live-clear-panel $panel_owned }
+    if $tty_on {
+        live-clear-panel $panel_owned
+        if $panel_owned <= 0 {
+            let esc = (char --integer 27)
+            print -n --stderr $"($esc)[?25h($esc)[?1049l"
+        }
+    }
     controller-release-lock
     print "Watch stopped."
 }
@@ -2745,9 +2765,11 @@ export def invoke [...args: string] {
         let rest = ($args | skip 1)
         let selected = ($rest | first | default "pro")
         if $selected == "standard" { launch-codex (provider-data).models.standard ($rest | skip 1) } else if $selected == "pro" { launch-codex (provider-data).models.pro ($rest | skip 1) } else { launch-codex (provider-data).models.pro $rest }
-    } else if $command == "run" { run-worker-command (provider-data).models.pro ($args | skip 1) } else if $command == "packet" { packet-command (provider-data).models.standard ($args | skip 1) } else if $command == "pro" {
+    } else if $command == "run" { run-worker-command (provider-data).models.standard ($args | skip 1) } else if $command == "packet" { packet-command (provider-data).models.standard ($args | skip 1) } else if $command == "pro" {
         if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.pro ($args | skip 2) } else if (($args | length) > 1) and (($args | get 1) == "packet") { packet-command (provider-data).models.pro ($args | skip 2) } else { launch-worker-interactive (provider-data).models.pro }
     } else if $command == "standard" {
         if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.standard ($args | skip 2) } else if (($args | length) > 1) and (($args | get 1) == "packet") { packet-command (provider-data).models.standard ($args | skip 2) } else { launch-worker-interactive (provider-data).models.standard }
+    } else if $command == "ultraspeed" {
+        if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.ultraspeed ($args | skip 2) } else if (($args | length) > 1) and (($args | get 1) == "packet") { packet-command (provider-data).models.ultraspeed ($args | skip 2) } else { launch-worker-interactive (provider-data).models.ultraspeed }
     } else { launch-worker-interactive (provider-data).models.pro }
 }
