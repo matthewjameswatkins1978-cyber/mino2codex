@@ -24,22 +24,25 @@ let results = [
     (test "JSON parsing and single authority" {
         let data = (open ($project_root | path join "config" | path join "mimo.json"))
         assert-equal $data.provider.env_key "MIMO_API_KEY" "env key"
-        assert-equal $data.models.pro "mimo-v2.5-pro" "pro model"
+        assert-equal $data.models.standard "mimo-v2.6-flash" "standard model"
+        assert-equal $data.models.pro "mimo-v2.6-pro" "pro model"
+        assert-equal $data.models.ultraspeed "mimo-v2.6-pro-ultraspeed" "ultraspeed model"
     })
     (test "catalogue validates both models" { assert (check-catalogue) "catalogue should validate" })
     (test "models table derives from catalogue" {
         let rows = (model-records)
-        assert-equal ($rows | length) 2 "two aliases"
-        assert (($rows | get model) | any {|item| $item == "mimo-v2.5"}) "standard model"
+        assert-equal ($rows | length) 3 "three aliases"
+        assert (($rows | get model) | any {|item| $item == "mimo-v2.6-flash"}) "standard model"
+        assert (($rows | get model) | any {|item| $item == "mimo-v2.6-pro-ultraspeed"}) "ultraspeed model"
     })
     (test "TOML generation parses and contains no key" {
         mkdir ($test_root | path join "codex-home")
-        write-codex-config "mimo-v2.5-pro"
+        write-codex-config "mimo-v2.6-pro"
         let path = ($test_root | path join "codex-home" | path join "config.toml")
         let raw = (open --raw $path)
         assert (not ($raw | str contains "tp-TEST")) "secret absent"
         let parsed = (open $path)
-        assert-equal $parsed.model "mimo-v2.5-pro" "model in toml"
+        assert-equal $parsed.model "mimo-v2.6-pro" "model in toml"
         assert-equal $parsed.model_providers.mimo.wire_api "responses" "wire api"
     })
     (test "child injection is scoped and redacted" {
@@ -87,10 +90,12 @@ let results = [
         assert (not ((worker-config-json) | str contains "tp-TEST")) "runtime config has no key"
     })
     (test "explicit worker model selection" {
-        let standard = (worker-command "mimo-v2.5" "task" null $project_root)
-        let pro = (worker-command "mimo-v2.5-pro" "task" null $project_root)
-        assert (($standard | str join " ") | str contains "m2c-mimo/mimo-v2.5") "standard explicit"
-        assert (($pro | str join " ") | str contains "m2c-mimo/mimo-v2.5-pro") "pro explicit"
+        let standard = (worker-command "mimo-v2.6-flash" "task" null $project_root)
+        let pro = (worker-command "mimo-v2.6-pro" "task" null $project_root)
+        let ultraspeed = (worker-command "mimo-v2.6-pro-ultraspeed" "task" null $project_root)
+        assert (($standard | str join " ") | str contains "m2c-mimo/mimo-v2.6-flash") "standard explicit"
+        assert (($pro | str join " ") | str contains "m2c-mimo/mimo-v2.6-pro") "pro explicit"
+        assert (($ultraspeed | str join " ") | str contains "m2c-mimo/mimo-v2.6-pro-ultraspeed") "ultraspeed explicit"
         assert (($standard | str join " ") | str contains "--format json") "json format"
         assert (($standard | str join " ") | str contains "--dir") "cwd flag"
     })
@@ -350,7 +355,7 @@ let results = [
         let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "feature/test", model: "turbo"}
         let result = (watch-validate-packet $fm)
         assert (not $result.ok) "invalid model rejected"
-        assert ($result.reason | str contains "standard or pro") "reason mentions valid models"
+        assert ($result.reason | str contains "standard, pro, or ultraspeed") "reason mentions valid models"
     })
     (test "watch validate rejects empty branch" {
         let fm = {m2c_job: "1", base: "abcdef0123456789abcdef0123456789abcdef02", branch: "", model: "standard"}

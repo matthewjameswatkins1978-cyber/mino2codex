@@ -30,7 +30,8 @@ If OpenCode is missing, `m2c setup` reports the detected state and the Nu-native
 m2c                         interactive Pro worker
 m2c standard                interactive standard worker
 m2c pro                     interactive Pro worker
-m2c run "bounded task"      machine worker, default Pro
+m2c ultraspeed              interactive latency-sensitive Pro worker
+m2c run "bounded task"      machine worker, default Flash
 m2c standard run "task"     machine standard worker
 m2c pro run --json "task"   machine Pro worker with JSON envelope
 m2c run --workstream NAME --packet A1 --json "task"
@@ -49,7 +50,7 @@ m2c version
 m2c uninstall
 ```
 
-Every machine run explicitly selects `m2c-mimo/mimo-v2.5` or `m2c-mimo/mimo-v2.5-pro`, passes the current directory with `--dir`, and uses `--format json`. Normal output is a small stable envelope containing status, provider, model, session, packet, tool counts, context estimate, exit code, and final text. Raw OpenCode events remain local job evidence.
+Every machine run explicitly selects `m2c-mimo/mimo-v2.6-flash`, `m2c-mimo/mimo-v2.6-pro`, or the opt-in `m2c-mimo/mimo-v2.6-pro-ultraspeed`, passes the current directory with `--dir`, and uses `--format json`. Normal output is a small stable envelope containing status, provider, model, session, packet, tool counts, context estimate, exit code, and final text. Raw OpenCode events remain local job evidence.
 
 Interactive machine runs also show a small live worker console on stderr. It refreshes on a three-second heartbeat from locally cached OpenCode events and process state: selected model, coarse activity, elapsed/watchdog time, tool counts, failures, context estimate, changed-file count, and quiet/final state. `--quiet` suppresses the console. stdout remains a clean JSON envelope for `m2c ... --json | jq .`; the console makes no provider or model calls and consumes no additional context tokens.
 
@@ -113,7 +114,7 @@ Credentials, API keys, environment secrets, and raw provider payloads are never 
 
 ## Configuration and security
 
-Each worker run injects an m2c-owned `OPENCODE_CONFIG_CONTENT` at runtime. It contains only the unique `m2c-mimo` provider, both supported models, the AMS endpoint, the provider allowlist, and bounded worker permissions. The API key remains in the existing local credential file and is referenced through `{env:MIMO_API_KEY}`; it is never serialized into runtime JSON, TOML, logs, or the repository.
+Each worker run injects an m2c-owned `OPENCODE_CONFIG_CONTENT` at runtime. It contains only the unique `m2c-mimo` provider, the V2.6 Flash, Pro, and opt-in UltraSpeed models, the AMS endpoint, the provider allowlist, and bounded worker permissions. The API key remains in the existing local credential file and is referenced through `{env:MIMO_API_KEY}`; it is never serialized into runtime JSON, TOML, logs, or the repository.
 
 The m2c skill is installed only in `CODEX_HOME/skills/mimo-worker/SKILL.md` (or the normal `~/.codex/skills` location when `CODEX_HOME` is unset). It does not modify global `AGENTS.md` or unrelated skills. `m2c uninstall` removes only that skill directory and m2c-owned state.
 

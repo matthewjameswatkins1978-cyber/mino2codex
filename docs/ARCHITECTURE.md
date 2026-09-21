@@ -17,7 +17,7 @@ OpenCode run --format json --dir <cwd>
 m2c-mimo / Xiaomi OpenAI-compatible endpoint
 ```
 
-Each run injects `OPENCODE_CONFIG_CONTENT` containing only the m2c-owned `m2c-mimo` provider, both supported MiMo models, the AMS endpoint, a provider allowlist, and machine-mode permissions. The model is always explicit; there is no provider fallback or implicit OpenCode model.
+Each run injects `OPENCODE_CONFIG_CONTENT` containing only the m2c-owned `m2c-mimo` provider, the three explicit MiMo profiles (Flash, Pro, and opt-in UltraSpeed), the AMS endpoint, a provider allowlist, and machine-mode permissions. The model is always explicit; there is no provider fallback or implicit OpenCode model.
 
 OpenCode JSONL is an implementation format. m2c parses it into a small stable envelope and retains raw events only as local job evidence. Textual pseudo-tool calls are never parsed or executed.
 
