@@ -2704,7 +2704,7 @@ let results = [
         assert (($frame | first) | str contains "watching") "header contains watching"
         assert (($frame | first) | str contains "0 active") "header shows 0 active"
         assert (($frame | first) | str contains "1 queued") "header shows 1 queued"
-        assert (($frame | first) | str contains "0.2.7") "header contains version"
+        assert (($frame | first) | str contains "0.2.8") "header contains version"
     })
     (test "live-panel-frame shows active job details" {
         let now = (date now)
@@ -2834,9 +2834,9 @@ let results = [
             assert (($line | describe) == "string") "each line is a string"
         }
     })
-    # --- live panel: version value is 0.2.7 ---
-    (test "version-value returns 0.2.7" {
-        assert-equal (version-value) "0.2.7" "version bumped"
+    # --- live panel: version value is 0.2.8 ---
+    (test "version-value returns 0.2.8" {
+        assert-equal (version-value) "0.2.8" "version bumped"
     })
     # --- live panel: queue count reflects controller truth ---
     (test "live-panel-state queued count passes through from controller" {
@@ -4314,9 +4314,9 @@ let results = [
         assert (not $missing.exists) "missing dependency is distinguished"
     })
     # --- version bump ---
-    (test "version is 0.2.7" {
+    (test "version is 0.2.8" {
         let ver = (open ($project_root | path join "VERSION") | str trim)
-        assert-equal $ver "0.2.7" "version bumped"
+        assert-equal $ver "0.2.8" "version bumped"
     })
     # --- stale watcher detection ---
     (test "stale-detection-root defaults to state-root" {
@@ -4444,7 +4444,7 @@ let results = [
         let frame = (live-panel-frame $state)
         let header = ($frame | first)
         assert ($header | str contains "watching") "normal header says watching"
-        assert ($header | str contains "0.2.7") "normal header shows version"
+        assert ($header | str contains "0.2.8") "normal header shows version"
         assert (not ($header | str contains "draining")) "normal header does not say draining"
     })
     (test "live-panel-state passes stale flag through" {
