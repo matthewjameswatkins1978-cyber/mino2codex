@@ -167,6 +167,8 @@ let results = [
         assert-equal (worker-summary $incomplete "mimo-v2.5" null null 1 0 false).status "failed" "missing completion signal fails closed"
         let malformed = (parse-worker-events "not-json\n{bad}\n{\"type\":\"tool_use\"")
         assert-equal ($malformed | length) 0 "malformed and scalar worker lines are discarded"
+        let no_part = (parse-worker-events '{"type":"step_start"}')
+        assert-equal ($no_part | length) 1 "record events without a part are retained"
     })
     (test "telemetry derives timing and tool aggregates without content" {
         let started = ((date now) - 5sec)
@@ -225,6 +227,7 @@ let results = [
         assert-equal (activity-from-event $read) "Inspecting project files" "read activity"
         assert-equal (activity-from-event $test) "Running verification tests" "test activity"
         assert-equal (activity-from-event {type: "unknown", part: {}}) "Working..." "unknown fallback"
+        assert-equal (activity-from-event {type: "step_start"}) "Working..." "missing part fallback"
     })
     (test "console state derives completion, failure, timeout and unknown context" {
         let started = (date now)

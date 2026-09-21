@@ -427,7 +427,10 @@ def checkpoint-state [state: record] {
 def parse-worker-events [raw: string] {
     $raw | lines | each {|line|
         let parsed = (try { $line | from json } catch { null })
-        if (($parsed | describe | str starts-with "record<")) { $parsed } else { null }
+        if $parsed == null { null } else {
+            let kind = ($parsed | describe)
+            if ($kind | str starts-with "record<") { $parsed } else { null }
+        }
     } | where {|item| $item != null }
 }
 
@@ -513,8 +516,9 @@ def telemetry-derived [events: list<any> started: any ended: any] {
 }
 
 def activity-from-event [event: any] {
-    let tool = ($event.part.tool? | default "" | str lowercase)
-    let input = ($event.part.state?.input? | default {})
+    let part = ($event.part? | default {})
+    let tool = ($part.tool? | default "" | str lowercase)
+    let input = ($part.state?.input? | default {})
     let command = ([$input.command? $input.cmd?] | where {|value| $value != null} | first | default "" | str lowercase)
     if $tool in ["read", "glob", "grep", "search", "list"] { "Inspecting project files" } else if $tool in ["edit", "write", "patch"] { "Updating project files" } else if ($command | str contains "test") or ($command | str contains "pytest") { "Running verification tests" } else if ($command | str contains "cargo") { "Building or checking Rust" } else if ($command | str contains "dune") or ($command | str contains "ocaml") { "Building or checking OCaml" } else if ($command | str contains "git") { "Reviewing changes" } else if ($command | str contains "checksum") or ($command | str contains "archive") { "Packaging release" } else if $event.type == "step_start" { "Working..." } else { "Working..." }
 }
