@@ -27,6 +27,7 @@ let results = [
         assert-equal $data.models.standard "mimo-v2.6-flash" "standard model"
         assert-equal $data.models.pro "mimo-v2.6-pro" "pro model"
         assert-equal $data.models.ultraspeed "mimo-v2.6-pro-ultraspeed" "ultraspeed model"
+        assert-equal $data.default "standard" "standard is the default profile"
     })
     (test "catalogue validates both models" { assert (check-catalogue) "catalogue should validate" })
     (test "models table derives from catalogue" {

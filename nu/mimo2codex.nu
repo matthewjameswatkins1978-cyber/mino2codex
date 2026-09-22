@@ -2763,7 +2763,7 @@ export def invoke [...args: string] {
     let command = ($args | first | default "")
     if $command in ["help", "--help", "-h"] { print-help } else if $command == "version" { version } else if $command == "models" { model-records | table } else if $command == "setup" { setup } else if $command == "doctor" { doctor ($args | skip 1) } else if $command == "key" { key-command ($args | skip 1) } else if $command == "checkpoint" { checkpoint-command ($args | skip 1) } else if $command == "watch" { watch-command ($args | skip 1) } else if $command == "status" { status-command } else if $command == "queue" { queue-command } else if $command == "stats" { stats-command ($args | skip 1) } else if $command == "failures" { failures-command } else if $command == "inspect" { inspect-command ($args | skip 1) } else if $command == "uninstall" { uninstall } else if $command == "codex" {
         let rest = ($args | skip 1)
-        let selected = ($rest | first | default "pro")
+        let selected = ($rest | first | default "standard")
         if $selected == "standard" { launch-codex (provider-data).models.standard ($rest | skip 1) } else if $selected == "pro" { launch-codex (provider-data).models.pro ($rest | skip 1) } else { launch-codex (provider-data).models.pro $rest }
     } else if $command == "run" { run-worker-command (provider-data).models.standard ($args | skip 1) } else if $command == "packet" { packet-command (provider-data).models.standard ($args | skip 1) } else if $command == "pro" {
         if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.pro ($args | skip 2) } else if (($args | length) > 1) and (($args | get 1) == "packet") { packet-command (provider-data).models.pro ($args | skip 2) } else { launch-worker-interactive (provider-data).models.pro }
@@ -2771,5 +2771,5 @@ export def invoke [...args: string] {
         if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.standard ($args | skip 2) } else if (($args | length) > 1) and (($args | get 1) == "packet") { packet-command (provider-data).models.standard ($args | skip 2) } else { launch-worker-interactive (provider-data).models.standard }
     } else if $command == "ultraspeed" {
         if (($args | length) > 1) and (($args | get 1) == "run") { run-worker-command (provider-data).models.ultraspeed ($args | skip 2) } else if (($args | length) > 1) and (($args | get 1) == "packet") { packet-command (provider-data).models.ultraspeed ($args | skip 2) } else { launch-worker-interactive (provider-data).models.ultraspeed }
-    } else { launch-worker-interactive (provider-data).models.pro }
+    } else { launch-worker-interactive (provider-data).models.standard }
 }

@@ -14,5 +14,5 @@
     "pro": "mimo-v2.6-pro",
     "ultraspeed": "mimo-v2.6-pro-ultraspeed"
   },
-  "default": "pro"
+  "default": "standard"
 }
