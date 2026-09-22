@@ -27,7 +27,7 @@ If OpenCode is missing, `m2c setup` reports the detected state and the Nu-native
 ## Public commands
 
 ```text
-m2c                         interactive Pro worker
+m2c                         interactive standard worker (Flash)
 m2c standard                interactive standard worker
 m2c pro                     interactive Pro worker
 m2c ultraspeed              interactive latency-sensitive Pro worker
